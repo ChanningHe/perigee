@@ -1,0 +1,20 @@
+[package]
+name = "perigee-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+perigee-core = { path = "../perigee-core" }
+perigee-sriov = { path = "../perigee-sriov" }
+tokio.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true

@@ -1,0 +1,50 @@
+[workspace]
+members = [
+    "crates/perigee-bin",
+    "crates/perigee-core",
+    "crates/perigee-daemon",
+    "crates/perigee-sriov",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Channing He"]
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "fs", "io-util", "macros", "sync", "time"] }
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# File watching
+notify = "7"
+
+# Random
+rand = "0.8"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Async trait
+async-trait = "0.1"
+
+# DateTime
+chrono = { version = "0.4", features = ["serde"] }

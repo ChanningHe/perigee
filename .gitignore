@@ -1,0 +1,5 @@
+dev/
+target/
+result
+release-static/
+*.tar.gz
