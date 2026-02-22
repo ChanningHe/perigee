@@ -6,17 +6,28 @@ use tracing::{error, info};
 use crate::module::ModuleRegistry;
 
 /// Run boot-time apply for all registered modules.
-pub async fn boot_apply(registry: &Arc<Mutex<ModuleRegistry>>) -> Result<()> {
+/// Locks and unlocks the registry for each module individually
+/// so that IPC requests can be served between applies.
+pub async fn boot_apply(registry: &Arc<Mutex<ModuleRegistry>>) {
     info!("starting boot-time apply");
-    let mut reg = registry.lock().await;
-    for module in reg.all_mut() {
-        info!(module = module.name(), "applying module");
-        if let Err(e) = module.apply().await {
-            error!(module = module.name(), error = %e, "module apply failed");
+
+    let module_names: Vec<String> = {
+        let reg = registry.lock().await;
+        reg.all().map(|m| m.name().to_string()).collect()
+    };
+
+    for name in &module_names {
+        info!(module = %name, "applying module");
+        let mut reg = registry.lock().await;
+        if let Some(module) = reg.get_mut(name) {
+            if let Err(e) = module.apply().await {
+                error!(module = %name, error = %e, "module apply failed");
+            }
         }
+        // Lock released here — IPC can serve requests between modules
     }
+
     info!("boot-time apply complete");
-    Ok(())
 }
 
 /// Main daemon run loop.
@@ -25,24 +36,32 @@ pub async fn run_daemon(
     config: Arc<Mutex<toml::Value>>,
     shutdown_tx: broadcast::Sender<()>,
 ) -> Result<()> {
-    // Boot-time apply
-    boot_apply(&registry).await?;
-
-    // Start IPC server
     let server = crate::server::IpcServer::new(registry.clone(), config.clone());
     let shutdown_rx = shutdown_tx.subscribe();
 
-    // Tell systemd we're ready
-    crate::notify::sd_notify_ready();
-    crate::notify::sd_notify_status("running");
-    info!("daemon ready");
-
-    tokio::select! {
-        result = server.run(shutdown_rx) => {
-            if let Err(e) = result {
-                error!(error = %e, "IPC server error");
-            }
+    // Spawn IPC server immediately so the socket is available
+    let ipc_handle = tokio::spawn(async move {
+        if let Err(e) = server.run(shutdown_rx).await {
+            error!(error = %e, "IPC server error");
         }
+    });
+
+    // Tell systemd we're ready — IPC is now accepting connections
+    crate::notify::sd_notify_ready();
+    crate::notify::sd_notify_status("applying profiles");
+    info!("daemon ready, IPC listening");
+
+    // Yield briefly so IPC task can bind the socket
+    tokio::task::yield_now().await;
+
+    // Boot-time apply runs while IPC is already serving
+    // (uses spawn_blocking internally for heavy sysfs ops)
+    boot_apply(&registry).await;
+    crate::notify::sd_notify_status("running");
+
+    // Wait for shutdown signal
+    tokio::select! {
+        _ = ipc_handle => {}
         _ = tokio::signal::ctrl_c() => {
             info!("received SIGINT, shutting down");
             let _ = shutdown_tx.send(());

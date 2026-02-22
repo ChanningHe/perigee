@@ -5,7 +5,7 @@ pub mod review;
 pub mod vf_config;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use perigee_core::ipc::Request;
+use perigee_core::ipc::{ProfileDetailStatus, Request, Response};
 use perigee_sriov::config::{SriovFileConfig, SriovProfileConfig};
 use perigee_sriov::detect::PhysicalFunction;
 use ratatui::{
@@ -88,6 +88,10 @@ pub struct SriovState {
 
     // Focus mode
     pub edit_focus: Option<EditFocus>,
+
+    // Status view cache
+    pub status_detail: Option<ProfileDetailStatus>,
+    pub status_error: Option<String>,
 }
 
 impl SriovState {
@@ -109,6 +113,8 @@ impl SriovState {
             vlan_id_buf: String::new(),
             fdb_cursor: 0,
             edit_focus: None,
+            status_detail: None,
+            status_error: None,
         }
     }
 
@@ -312,7 +318,11 @@ pub async fn handle_profiles_input(state: &mut AppState, key: KeyEvent) {
         }
         KeyCode::Enter | KeyCode::Char('s') => {
             if let Some(idx) = state.sriov_state.profile_list_state.selected() {
+                state.sriov_state.status_detail = None;
+                state.sriov_state.status_error = None;
+                state.sriov_state.message = None;
                 state.screen = AppScreen::SriovStatus(idx);
+                fetch_profile_status(state, idx).await;
             }
         }
         KeyCode::Char('e') => {
@@ -357,45 +367,186 @@ pub fn render_status(frame: &mut Frame, state: &AppState, profile_idx: usize) {
         ])
         .split(frame.area());
 
-    let title = if let Some((name, _)) = state.sriov_state.profiles.get(profile_idx) {
-        format!("SR-IOV > {} > Status", name)
-    } else {
-        "SR-IOV > Status".to_string()
+    let (profile_name, profile) = match state.sriov_state.profiles.get(profile_idx) {
+        Some((n, p)) => (n.clone(), p.clone()),
+        None => {
+            common::header_bar(frame, chunks[0], "SR-IOV > Status", state.daemon_online);
+            let para = Paragraph::new("  Profile not found").block(
+                Block::default().borders(Borders::ALL),
+            );
+            frame.render_widget(para, chunks[1]);
+            common::footer_bar(frame, chunks[2], &[("Esc", "Back")]);
+            return;
+        }
     };
 
-    common::header_bar(frame, chunks[0], &title, state.daemon_online);
+    common::header_bar(
+        frame,
+        chunks[0],
+        &format!("SR-IOV > {} > Status", profile_name),
+        state.daemon_online,
+    );
 
-    let content = if let Some((_name, profile)) = state.sriov_state.profiles.get(profile_idx) {
-        vec![
-            Line::from(vec![
-                Span::styled("  PF MAC:      ", Style::default().fg(Color::DarkGray)),
-                Span::styled(profile.mac.to_string(), Style::default().fg(Color::White)),
-            ]),
-            Line::from(vec![
-                Span::styled("  VF Count:    ", Style::default().fg(Color::DarkGray)),
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Config info (always available)
+    lines.push(Line::from(Span::styled(
+        "  ── Configuration ──",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(vec![
+        Span::styled("  PF MAC:       ", Style::default().fg(Color::DarkGray)),
+        Span::styled(profile.mac.to_string(), Style::default().fg(Color::White)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  VF Count:     ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            profile.num_vfs.to_string(),
+            Style::default().fg(Color::White),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  MAC Strategy: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{:?}", profile.mac_strategy),
+            Style::default().fg(Color::White),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  FDB Mode:     ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{:?}", profile.fdb.mode),
+            Style::default().fg(Color::White),
+        ),
+    ]));
+    lines.push(Line::from(""));
+
+    // Runtime status from daemon
+    if let Some(detail) = &state.sriov_state.status_detail {
+        let state_color = match detail.state {
+            perigee_core::ipc::ProfileState::Active => Color::Green,
+            perigee_core::ipc::ProfileState::Degraded => Color::Yellow,
+            perigee_core::ipc::ProfileState::Pending => Color::Cyan,
+            _ => Color::Red,
+        };
+        lines.push(Line::from(Span::styled(
+            "  ── Runtime ──",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(vec![
+            Span::styled("  State:        ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{}", detail.state), Style::default().fg(state_color)),
+        ]));
+        if let Some(ref iface) = detail.pf_iface {
+            lines.push(Line::from(vec![
+                Span::styled("  PF Iface:     ", Style::default().fg(Color::DarkGray)),
+                Span::styled(iface.as_str(), Style::default().fg(Color::White)),
+            ]));
+        }
+        if let Some(ts) = &detail.last_applied {
+            lines.push(Line::from(vec![
+                Span::styled("  Last Applied: ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    profile.num_vfs.to_string(),
+                    ts.format("%Y-%m-%d %H:%M:%S").to_string(),
                     Style::default().fg(Color::White),
                 ),
-            ]),
-            Line::from(vec![
-                Span::styled("  MAC Strategy:", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!(" {:?}", profile.mac_strategy),
-                    Style::default().fg(Color::White),
+            ]));
+        }
+
+        // FDB status
+        lines.push(Line::from(vec![
+            Span::styled("  FDB Entries:  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                detail.fdb.managed_entries.to_string(),
+                Style::default().fg(Color::White),
+            ),
+        ]));
+
+        // VF summary
+        if !detail.vfs.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  ── VF Status ──",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  {:>4}  {:<18} {:<6} {:<8} {:<6} {}",
+                    "VF#", "MAC", "Trust", "SpoofChk", "VLAN", "Status"
                 ),
-            ]),
-            Line::from(""),
-            Line::from(Span::styled(
-                "  (Connect to daemon for live runtime status)",
                 Style::default().fg(Color::DarkGray),
-            )),
-        ]
-    } else {
-        vec![Line::from("  Profile not found")]
-    };
+            )));
 
-    let para = Paragraph::new(content).block(
+            let max_show = 20;
+            for vf in detail.vfs.iter().take(max_show) {
+                let status_str = if vf.matches { "OK" } else { "MISMATCH" };
+                let status_color = if vf.matches {
+                    Color::Green
+                } else {
+                    Color::Red
+                };
+                let vlan_str = vf
+                    .configured
+                    .vlan_id
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "-".to_string());
+
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!(
+                            "  {:>4}  {:<18} {:<6} {:<8} {:<6} ",
+                            vf.index,
+                            &vf.configured.mac,
+                            if vf.configured.trust { "✓" } else { "✗" },
+                            if vf.configured.spoofchk { "✓" } else { "✗" },
+                            vlan_str,
+                        ),
+                        Style::default().fg(Color::Gray),
+                    ),
+                    Span::styled(status_str, Style::default().fg(status_color)),
+                ]));
+            }
+            if detail.vfs.len() > max_show {
+                lines.push(Line::from(Span::styled(
+                    format!("  ... and {} more VFs", detail.vfs.len() - max_show),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        }
+    } else if let Some(err) = &state.sriov_state.status_error {
+        lines.push(Line::from(Span::styled(
+            "  ── Runtime ──",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("  {}", err),
+            Style::default().fg(Color::Yellow),
+        )));
+    } else if !state.daemon_online {
+        lines.push(Line::from(Span::styled(
+            "  Daemon offline — no runtime status available.",
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+
+    // Message
+    if let Some(msg) = &state.sriov_state.message {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("  {}", msg),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+
+    let para = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray)),
@@ -405,13 +556,20 @@ pub fn render_status(frame: &mut Frame, state: &AppState, profile_idx: usize) {
     common::footer_bar(
         frame,
         chunks[2],
-        &[("e", "Edit"), ("R", "Retry"), ("Esc", "Back")],
+        &[
+            ("e", "Edit"),
+            ("R", "Refresh"),
+            ("a", "Apply"),
+            ("Esc", "Back"),
+        ],
     );
 }
 
-pub fn handle_status_input(state: &mut AppState, key: KeyEvent, profile_idx: usize) {
+pub async fn handle_status_input(state: &mut AppState, key: KeyEvent, profile_idx: usize) {
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
+            state.sriov_state.status_detail = None;
+            state.sriov_state.status_error = None;
             state.screen = AppScreen::SriovProfiles;
         }
         KeyCode::Char('e') => {
@@ -424,7 +582,69 @@ pub fn handle_status_input(state: &mut AppState, key: KeyEvent, profile_idx: usi
                 state.screen = AppScreen::SriovEditor(profile_idx);
             }
         }
+        KeyCode::Char('R') | KeyCode::Char('r') => {
+            fetch_profile_status(state, profile_idx).await;
+        }
+        KeyCode::Char('a') => {
+            if let Some((name, _)) = state.sriov_state.profiles.get(profile_idx) {
+                let profile_name = name.clone();
+                if crate::client::IpcClient::is_daemon_running() {
+                    match crate::client::IpcClient::send(&Request::Apply {
+                        profile: profile_name.clone(),
+                    })
+                    .await
+                    {
+                        Ok(Response::Ok) => {
+                            state.sriov_state.message =
+                                Some(format!("Apply triggered for '{}'", profile_name));
+                            fetch_profile_status(state, profile_idx).await;
+                        }
+                        Ok(Response::Error { message }) => {
+                            state.sriov_state.message = Some(format!("Apply error: {}", message));
+                        }
+                        _ => {
+                            state.sriov_state.message =
+                                Some("Unexpected daemon response".to_string());
+                        }
+                    }
+                } else {
+                    state.sriov_state.message = Some("Daemon is not running".to_string());
+                }
+            }
+        }
         _ => {}
+    }
+}
+
+async fn fetch_profile_status(state: &mut AppState, profile_idx: usize) {
+    if let Some((name, _)) = state.sriov_state.profiles.get(profile_idx) {
+        let profile_name = name.clone();
+        if crate::client::IpcClient::is_daemon_running() {
+            match crate::client::IpcClient::send(&Request::ProfileStatus {
+                profile: profile_name,
+            })
+            .await
+            {
+                Ok(Response::ProfileDetail(detail)) => {
+                    state.sriov_state.status_detail = Some(detail);
+                    state.sriov_state.status_error = None;
+                }
+                Ok(Response::Error { message }) => {
+                    state.sriov_state.status_detail = None;
+                    state.sriov_state.status_error = Some(message);
+                }
+                Err(e) => {
+                    state.sriov_state.status_detail = None;
+                    state.sriov_state.status_error = Some(format!("IPC error: {}", e));
+                }
+                _ => {
+                    state.sriov_state.status_detail = None;
+                    state.sriov_state.status_error = Some("Unexpected response".to_string());
+                }
+            }
+        } else {
+            state.sriov_state.status_error = Some("Daemon is not running".to_string());
+        }
     }
 }
 
@@ -478,6 +698,23 @@ pub fn render_editor(frame: &mut Frame, state: &AppState, profile_idx: usize) {
         EditorTab::VfTable => vf_config::render_vf_table(frame, state, chunks[2]),
         EditorTab::Fdb => fdb_config::render(frame, state, chunks[2]),
         EditorTab::Review => review::render(frame, state, chunks[2]),
+    }
+
+    // Show message if present (on non-Review tabs, since Review shows it inline)
+    if state.sriov_state.active_tab != EditorTab::Review {
+        if let Some(msg) = &state.sriov_state.message {
+            let msg_area = ratatui::layout::Rect {
+                x: chunks[2].x,
+                y: chunks[2].y + chunks[2].height.saturating_sub(1),
+                width: chunks[2].width,
+                height: 1,
+            };
+            let msg_para = Paragraph::new(Line::from(Span::styled(
+                format!("  {}", msg),
+                Style::default().fg(Color::Yellow),
+            )));
+            frame.render_widget(msg_para, msg_area);
+        }
     }
 
     // Dynamic footer hints based on focus state
@@ -564,16 +801,27 @@ async fn do_save(state: &mut AppState) {
     state.sriov_state.edit_focus = None;
     match state.sriov_state.save_config() {
         Ok(()) => {
-            state.sriov_state.message = Some("Config saved.".to_string());
-            // Notify daemon if running
+            let mut msg = "✓ Config saved to /etc/perigee/sriov.toml".to_string();
             if crate::client::IpcClient::is_daemon_running() {
-                let _ = crate::client::IpcClient::send(&Request::Reload).await;
-                state.sriov_state.message =
-                    Some("Config saved. Reload sent to daemon.".to_string());
+                match crate::client::IpcClient::send(&Request::Reload).await {
+                    Ok(Response::Ok) => {
+                        msg.push_str(" — daemon reloaded.");
+                    }
+                    Ok(Response::Error { message }) => {
+                        msg.push_str(&format!(" — daemon reload error: {}", message));
+                    }
+                    _ => {
+                        msg.push_str(" — daemon reload: unexpected response.");
+                    }
+                }
             }
+            state.sriov_state.message = Some(msg);
+            // Switch to Review tab to show the feedback
+            state.sriov_state.active_tab = EditorTab::Review;
         }
         Err(e) => {
-            state.sriov_state.message = Some(format!("Save failed: {}", e));
+            state.sriov_state.message = Some(format!("✗ Save failed: {}", e));
+            state.sriov_state.active_tab = EditorTab::Review;
         }
     }
 }

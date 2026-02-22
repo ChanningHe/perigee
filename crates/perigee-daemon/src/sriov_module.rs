@@ -54,10 +54,19 @@ impl SriovModule {
         }
     }
 
-    fn apply_all_profiles(&mut self) {
+    async fn apply_all_profiles(&mut self) {
         for (name, rt) in &mut self.profiles {
-            match vf::apply_profile(name, &rt.config) {
-                Ok(result) => {
+            let profile_name = name.clone();
+            let config = rt.config.clone();
+
+            // Run blocking sysfs/ip-link operations on a dedicated thread
+            let apply_result = tokio::task::spawn_blocking(move || {
+                vf::apply_profile(&profile_name, &config)
+            })
+            .await;
+
+            match apply_result {
+                Ok(Ok(result)) => {
                     rt.last_applied = Some(Utc::now());
                     if result.is_success() {
                         rt.state = ProfileState::Active;
@@ -81,7 +90,7 @@ impl SriovModule {
                         push_event(&mut rt.events, EventLevel::Error, format!("Failed: {}", msg));
                     }
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     let msg = e.to_string();
                     if msg.contains("no interface found with MAC") {
                         rt.state = ProfileState::NicOffline;
@@ -90,6 +99,13 @@ impl SriovModule {
                         rt.state = ProfileState::Error;
                         rt.error_count += 1;
                     }
+                    rt.last_error = Some(msg.clone());
+                    push_event(&mut rt.events, EventLevel::Error, msg);
+                }
+                Err(e) => {
+                    let msg = format!("apply task panicked: {}", e);
+                    rt.state = ProfileState::Error;
+                    rt.error_count += 1;
                     rt.last_error = Some(msg.clone());
                     push_event(&mut rt.events, EventLevel::Error, msg);
                 }
@@ -238,7 +254,7 @@ impl Module for SriovModule {
     }
 
     async fn apply(&mut self) -> Result<()> {
-        self.apply_all_profiles();
+        self.apply_all_profiles().await;
 
         let (tx, _) = broadcast::channel(4);
         self.shutdown_tx = Some(tx.clone());

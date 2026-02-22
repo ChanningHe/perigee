@@ -22,28 +22,31 @@ pub fn apply_profile(profile_name: &str, config: &SriovProfileConfig) -> Result<
         errors: Vec::new(),
     };
 
-    // Step 1: Reset existing VFs
-    let current = sysfs::read_sriov_numvfs(&pf_iface).unwrap_or(0);
-    if current > 0 {
-        info!(pf = %pf_iface, current_vfs = current, "resetting existing VFs");
-        if let Err(e) = sysfs::write_sriov_numvfs(&pf_iface, 0) {
-            result.errors.push(format!("failed to reset VFs: {}", e));
-            return Ok(result);
-        }
-        std::thread::sleep(std::time::Duration::from_secs(1));
-    }
-
-    // Step 2: Ensure PF is up
+    // Step 1: Ensure PF is up
     if let Err(e) = set_link_up(&pf_iface) {
         warn!(pf = %pf_iface, error = %e, "failed to bring PF up");
     }
 
-    // Step 3: Create VFs
-    if let Err(e) = sysfs::write_sriov_numvfs(&pf_iface, config.num_vfs) {
-        result
-            .errors
-            .push(format!("failed to create {} VFs: {}", config.num_vfs, e));
-        return Ok(result);
+    // Step 2: Create/reset VFs only if count differs
+    let current = sysfs::read_sriov_numvfs(&pf_iface).unwrap_or(0);
+    if current == config.num_vfs {
+        info!(pf = %pf_iface, vfs = current, "VF count already matches, skipping reset");
+    } else {
+        if current > 0 {
+            info!(pf = %pf_iface, current_vfs = current, target_vfs = config.num_vfs, "resetting VFs");
+            if let Err(e) = sysfs::write_sriov_numvfs(&pf_iface, 0) {
+                result.errors.push(format!("failed to reset VFs: {}", e));
+                return Ok(result);
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+
+        if let Err(e) = sysfs::write_sriov_numvfs(&pf_iface, config.num_vfs) {
+            result
+                .errors
+                .push(format!("failed to create {} VFs: {}", config.num_vfs, e));
+            return Ok(result);
+        }
     }
 
     let actual = sysfs::read_sriov_numvfs(&pf_iface).unwrap_or(0);

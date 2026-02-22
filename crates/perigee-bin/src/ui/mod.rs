@@ -75,7 +75,9 @@ async fn main_loop(terminal: &mut DefaultTerminal, state: &mut AppState) -> Resu
                 match state.screen {
                     AppScreen::Home => home::handle_input(state, key),
                     AppScreen::SriovProfiles => sriov::handle_profiles_input(state, key).await,
-                    AppScreen::SriovStatus(idx) => sriov::handle_status_input(state, key, idx),
+                    AppScreen::SriovStatus(idx) => {
+                        sriov::handle_status_input(state, key, idx).await
+                    }
                     AppScreen::SriovEditor(idx) => {
                         sriov::handle_editor_input(state, key, Some(idx)).await
                     }
