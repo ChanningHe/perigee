@@ -4,3 +4,4 @@ pub mod ipc;
 pub mod mac;
 pub mod pci;
 pub mod sysfs;
+pub mod sysinfo;

@@ -235,9 +235,14 @@ async fn handle_sriov_cli(action: SriovAction) -> Result<()> {
             if config_path.exists() {
                 let config = perigee_sriov::config::SriovFileConfig::load(&config_path)?;
                 if let Some((_name, profile)) = config.sriov.iter().next() {
+                    let pf_mac = profile.mac.to_string();
                     let pf_iface =
-                        perigee_core::sysfs::find_iface_by_mac(&profile.mac.to_string())
-                            .unwrap_or_else(|_| "REPLACE_WITH_PF_IFACE".to_string());
+                        perigee_core::sysfs::find_iface_by_mac(&pf_mac).map_err(|_| {
+                            anyhow::anyhow!(
+                                "Cannot detect PF interface for MAC {}. Is the NIC online?",
+                                pf_mac
+                            )
+                        })?;
                     perigee_sriov::fdb::generate_hookscript(&output, &pf_iface)?;
                     println!("Hookscript generated: {}", output.display());
                     println!(

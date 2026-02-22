@@ -21,6 +21,7 @@ pub struct AppState {
     pub should_quit: bool,
     pub daemon_online: bool,
     pub sriov_state: sriov::SriovState,
+    pub host_info: perigee_core::sysinfo::HostInfo,
 }
 
 impl AppState {
@@ -31,6 +32,7 @@ impl AppState {
             should_quit: false,
             daemon_online,
             sriov_state: sriov::SriovState::new(),
+            host_info: perigee_core::sysinfo::HostInfo::gather(),
         }
     }
 }
@@ -50,6 +52,7 @@ pub async fn run_sriov_tui() -> Result<()> {
     let mut state = AppState::new();
     state.screen = AppScreen::SriovProfiles;
     state.sriov_state.load_profiles();
+    state.sriov_state.fetch_profile_statuses().await;
     let result = main_loop(&mut terminal, &mut state).await;
     tui::restore()?;
     result
@@ -73,7 +76,7 @@ async fn main_loop(terminal: &mut DefaultTerminal, state: &mut AppState) -> Resu
                     continue;
                 }
                 match state.screen {
-                    AppScreen::Home => home::handle_input(state, key),
+                    AppScreen::Home => home::handle_input(state, key).await,
                     AppScreen::SriovProfiles => sriov::handle_profiles_input(state, key).await,
                     AppScreen::SriovStatus(idx) => {
                         sriov::handle_status_input(state, key, idx).await

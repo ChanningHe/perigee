@@ -5,17 +5,17 @@ pub mod review;
 pub mod vf_config;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use perigee_core::ipc::{ProfileDetailStatus, Request, Response};
+use perigee_core::ipc::{ProfileDetailStatus, ProfileState, Request, Response};
 use perigee_sriov::config::{SriovFileConfig, SriovProfileConfig};
 use perigee_sriov::detect::PhysicalFunction;
 use ratatui::{
     layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs},
     Frame,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::{common, AppScreen, AppState};
 
@@ -89,6 +89,9 @@ pub struct SriovState {
     // Focus mode
     pub edit_focus: Option<EditFocus>,
 
+    // Profile list status cache
+    pub profile_statuses: HashMap<String, ProfileState>,
+
     // Status view cache
     pub status_detail: Option<ProfileDetailStatus>,
     pub status_error: Option<String>,
@@ -113,6 +116,7 @@ impl SriovState {
             vlan_id_buf: String::new(),
             fdb_cursor: 0,
             edit_focus: None,
+            profile_statuses: HashMap::new(),
             status_detail: None,
             status_error: None,
         }
@@ -127,6 +131,24 @@ impl SriovState {
         }
         if !self.profiles.is_empty() && self.profile_list_state.selected().is_none() {
             self.profile_list_state.select(Some(0));
+        }
+    }
+
+    pub async fn fetch_profile_statuses(&mut self) {
+        if !crate::client::IpcClient::is_daemon_running() {
+            return;
+        }
+        if let Ok(Response::Status(status)) =
+            crate::client::IpcClient::send(&Request::Status).await
+        {
+            for module in &status.modules {
+                if module.name == "sriov" {
+                    for ps in &module.profiles {
+                        self.profile_statuses
+                            .insert(ps.name.clone(), ps.state);
+                    }
+                }
+            }
         }
     }
 
@@ -213,25 +235,33 @@ pub fn render_profiles(frame: &mut Frame, state: &AppState) {
 
     if state.sriov_state.profiles.is_empty() {
         let empty = Paragraph::new(Line::from(vec![
-            Span::raw("  No profiles configured. Press "),
+            Span::styled("  No profiles configured. Press ", common::style_muted()),
             Span::styled(
                 "n",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(common::BRAND)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(" to create one."),
+            Span::styled(" to create one.", common::style_muted()),
         ]))
-        .block(Block::default().borders(Borders::ALL).title(" Profiles "));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(common::BORDER))
+                .title(Span::styled(
+                    " Profiles ",
+                    Style::default().fg(common::BRAND_DIM),
+                )),
+        );
         frame.render_widget(empty, chunks[1]);
     } else {
-        let header = Line::from(vec![Span::styled(
+        let header = Line::from(Span::styled(
             format!(
                 "  {:<20} {:<20} {:>4}  {:<10}",
                 "Profile", "PF MAC", "VFs", "Status"
             ),
-            Style::default().fg(Color::DarkGray),
-        )]);
+            common::style_muted(),
+        ));
 
         let items: Vec<ListItem> = state
             .sriov_state
@@ -240,29 +270,75 @@ pub fn render_profiles(frame: &mut Frame, state: &AppState) {
             .enumerate()
             .map(|(i, (name, profile))| {
                 let selected = state.sriov_state.profile_list_state.selected() == Some(i);
-                let prefix = if selected { "▸ " } else { "  " };
-                let style = if selected {
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
+                let prefix = if selected { " ▸ " } else { "   " };
+
+                let status = state
+                    .sriov_state
+                    .profile_statuses
+                    .get(name)
+                    .copied();
+                let status_str = status
+                    .as_ref()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| {
+                        if state.daemon_online {
+                            "—".to_string()
+                        } else {
+                            "offline".to_string()
+                        }
+                    });
+                let status_color = status
+                    .as_ref()
+                    .map(common::state_color)
+                    .unwrap_or(common::TEXT_MUTED);
+
+                let name_style = if selected {
+                    common::style_selected()
                 } else {
-                    Style::default().fg(Color::Gray)
+                    Style::default().fg(common::TEXT_DIM)
                 };
-                ListItem::new(Line::from(Span::styled(
-                    format!(
-                        "{}{:<20} {:<20} {:>4}  {:<10}",
-                        prefix, name, profile.mac, profile.num_vfs, "—"
+
+                ListItem::new(Line::from(vec![
+                    Span::styled(prefix, name_style),
+                    Span::styled(format!("{:<20}", name), name_style),
+                    Span::styled(
+                        format!("{:<20}", profile.mac),
+                        if selected {
+                            Style::default().fg(common::TEXT)
+                        } else {
+                            common::style_muted()
+                        },
                     ),
-                    style,
-                )))
+                    Span::styled(
+                        format!("{:>4}  ", profile.num_vfs),
+                        if selected {
+                            Style::default().fg(common::TEXT)
+                        } else {
+                            common::style_muted()
+                        },
+                    ),
+                    Span::styled(
+                        format!("{:<10}", status_str),
+                        Style::default()
+                            .fg(status_color)
+                            .add_modifier(if selected {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
+                    ),
+                ]))
             })
             .collect();
 
         let list = List::new(items).block(
             Block::default()
-                .title(" Profiles ")
+                .title(Span::styled(
+                    " Profiles ",
+                    Style::default().fg(common::BRAND_DIM),
+                ))
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(Style::default().fg(common::BORDER)),
         );
 
         let inner_chunks = Layout::default()
@@ -274,16 +350,33 @@ pub fn render_profiles(frame: &mut Frame, state: &AppState) {
         frame.render_widget(list, inner_chunks[1]);
     }
 
+    // Show message if present
+    if let Some(msg) = &state.sriov_state.message {
+        let msg_area = ratatui::layout::Rect {
+            x: chunks[1].x + 1,
+            y: chunks[1].y + chunks[1].height.saturating_sub(2),
+            width: chunks[1].width.saturating_sub(2),
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                format!("  {}", msg),
+                common::style_warn(),
+            )),
+            msg_area,
+        );
+    }
+
     common::footer_bar(
         frame,
         chunks[2],
         &[
-            ("s/Enter", "Status"),
+            ("Enter", "Status"),
             ("e", "Edit"),
             ("n", "New"),
             ("d", "Delete"),
             ("r", "Reload"),
-            ("q", "Quit"),
+            ("q", "Back"),
         ],
     );
 }
@@ -350,6 +443,8 @@ pub async fn handle_profiles_input(state: &mut AppState, key: KeyEvent) {
                 let _ = crate::client::IpcClient::send(&Request::Reload).await;
                 state.sriov_state.message = Some("Reload sent to daemon".to_string());
             }
+            state.sriov_state.load_profiles();
+            state.sriov_state.fetch_profile_statuses().await;
         }
         _ => {}
     }
@@ -389,108 +484,70 @@ pub fn render_status(frame: &mut Frame, state: &AppState, profile_idx: usize) {
 
     let mut lines: Vec<Line> = Vec::new();
 
-    // Config info (always available)
-    lines.push(Line::from(Span::styled(
-        "  ── Configuration ──",
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(vec![
-        Span::styled("  PF MAC:       ", Style::default().fg(Color::DarkGray)),
-        Span::styled(profile.mac.to_string(), Style::default().fg(Color::White)),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("  VF Count:     ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            profile.num_vfs.to_string(),
-            Style::default().fg(Color::White),
-        ),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("  MAC Strategy: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            format!("{:?}", profile.mac_strategy),
-            Style::default().fg(Color::White),
-        ),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("  FDB Mode:     ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            format!("{:?}", profile.fdb.mode),
-            Style::default().fg(Color::White),
-        ),
-    ]));
+    let section_hdr = |text: &str| -> Line<'static> {
+        Line::from(Span::styled(
+            format!("  {}", text),
+            Style::default()
+                .fg(common::TEXT)
+                .add_modifier(Modifier::BOLD),
+        ))
+    };
+    let kv = |label: &str, value: String, vc: ratatui::style::Color| -> Line<'static> {
+        Line::from(vec![
+            Span::styled(format!("  {:<16}", label), common::style_label()),
+            Span::styled(value, Style::default().fg(vc)),
+        ])
+    };
+
+    lines.push(section_hdr("── Configuration ──"));
+    lines.push(kv("PF MAC:", profile.mac.to_string(), common::TEXT));
+    lines.push(kv("VF Count:", profile.num_vfs.to_string(), common::TEXT));
+    lines.push(kv(
+        "MAC Strategy:",
+        format!("{:?}", profile.mac_strategy),
+        common::TEXT,
+    ));
+    lines.push(kv(
+        "FDB Mode:",
+        format!("{:?}", profile.fdb.mode),
+        common::TEXT,
+    ));
     lines.push(Line::from(""));
 
-    // Runtime status from daemon
     if let Some(detail) = &state.sriov_state.status_detail {
-        let state_color = match detail.state {
-            perigee_core::ipc::ProfileState::Active => Color::Green,
-            perigee_core::ipc::ProfileState::Degraded => Color::Yellow,
-            perigee_core::ipc::ProfileState::Pending => Color::Cyan,
-            _ => Color::Red,
-        };
-        lines.push(Line::from(Span::styled(
-            "  ── Runtime ──",
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(vec![
-            Span::styled("  State:        ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{}", detail.state), Style::default().fg(state_color)),
-        ]));
+        let sc = common::state_color(&detail.state);
+        lines.push(section_hdr("── Runtime ──"));
+        lines.push(kv("State:", format!("{}", detail.state), sc));
         if let Some(ref iface) = detail.pf_iface {
-            lines.push(Line::from(vec![
-                Span::styled("  PF Iface:     ", Style::default().fg(Color::DarkGray)),
-                Span::styled(iface.as_str(), Style::default().fg(Color::White)),
-            ]));
+            lines.push(kv("PF Iface:", iface.clone(), common::TEXT));
         }
         if let Some(ts) = &detail.last_applied {
-            lines.push(Line::from(vec![
-                Span::styled("  Last Applied: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    ts.format("%Y-%m-%d %H:%M:%S").to_string(),
-                    Style::default().fg(Color::White),
-                ),
-            ]));
+            lines.push(kv(
+                "Last Applied:",
+                ts.format("%Y-%m-%d %H:%M:%S").to_string(),
+                common::TEXT,
+            ));
         }
+        lines.push(kv(
+            "FDB Entries:",
+            detail.fdb.managed_entries.to_string(),
+            common::TEXT,
+        ));
 
-        // FDB status
-        lines.push(Line::from(vec![
-            Span::styled("  FDB Entries:  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                detail.fdb.managed_entries.to_string(),
-                Style::default().fg(Color::White),
-            ),
-        ]));
-
-        // VF summary
         if !detail.vfs.is_empty() {
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "  ── VF Status ──",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            )));
+            lines.push(section_hdr("── VF Status ──"));
             lines.push(Line::from(Span::styled(
                 format!(
                     "  {:>4}  {:<18} {:<6} {:<8} {:<6} {}",
-                    "VF#", "MAC", "Trust", "SpoofChk", "VLAN", "Status"
+                    "VF#", "MAC", "Trust", "Spoof", "VLAN", "Status"
                 ),
-                Style::default().fg(Color::DarkGray),
+                common::style_muted(),
             )));
 
             let max_show = 20;
             for vf in detail.vfs.iter().take(max_show) {
-                let status_str = if vf.matches { "OK" } else { "MISMATCH" };
-                let status_color = if vf.matches {
-                    Color::Green
-                } else {
-                    Color::Red
-                };
+                let ok = vf.matches;
                 let vlan_str = vf
                     .configured
                     .vlan_id
@@ -507,49 +564,46 @@ pub fn render_status(frame: &mut Frame, state: &AppState, profile_idx: usize) {
                             if vf.configured.spoofchk { "✓" } else { "✗" },
                             vlan_str,
                         ),
-                        Style::default().fg(Color::Gray),
+                        Style::default().fg(common::TEXT_DIM),
                     ),
-                    Span::styled(status_str, Style::default().fg(status_color)),
+                    Span::styled(
+                        if ok { "OK" } else { "MISMATCH" },
+                        Style::default().fg(if ok { common::SUCCESS } else { common::ERROR }),
+                    ),
                 ]));
             }
             if detail.vfs.len() > max_show {
                 lines.push(Line::from(Span::styled(
                     format!("  ... and {} more VFs", detail.vfs.len() - max_show),
-                    Style::default().fg(Color::DarkGray),
+                    common::style_muted(),
                 )));
             }
         }
     } else if let Some(err) = &state.sriov_state.status_error {
-        lines.push(Line::from(Span::styled(
-            "  ── Runtime ──",
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )));
+        lines.push(section_hdr("── Runtime ──"));
         lines.push(Line::from(Span::styled(
             format!("  {}", err),
-            Style::default().fg(Color::Yellow),
+            common::style_warn(),
         )));
     } else if !state.daemon_online {
         lines.push(Line::from(Span::styled(
             "  Daemon offline — no runtime status available.",
-            Style::default().fg(Color::Yellow),
+            common::style_warn(),
         )));
     }
 
-    // Message
     if let Some(msg) = &state.sriov_state.message {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             format!("  {}", msg),
-            Style::default().fg(Color::Yellow),
+            common::style_warn(),
         )));
     }
 
     let para = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(Style::default().fg(common::BORDER)),
     );
     frame.render_widget(para, chunks[1]);
 
@@ -677,10 +731,10 @@ pub fn render_editor(frame: &mut Frame, state: &AppState, profile_idx: usize) {
         .map(|t| {
             let style = if *t == state.sriov_state.active_tab {
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(common::BRAND)
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
             } else {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(common::TEXT_MUTED)
             };
             Line::from(Span::styled(t.title(), style))
         })
@@ -688,7 +742,7 @@ pub fn render_editor(frame: &mut Frame, state: &AppState, profile_idx: usize) {
 
     let tabs = Tabs::new(tab_titles)
         .select(state.sriov_state.active_tab.index())
-        .divider(Span::raw(" │ "));
+        .divider(Span::styled(" │ ", Style::default().fg(common::BORDER)));
     frame.render_widget(tabs, chunks[1]);
 
     // Tab content
@@ -711,7 +765,7 @@ pub fn render_editor(frame: &mut Frame, state: &AppState, profile_idx: usize) {
             };
             let msg_para = Paragraph::new(Line::from(Span::styled(
                 format!("  {}", msg),
-                Style::default().fg(Color::Yellow),
+                common::style_warn(),
             )));
             frame.render_widget(msg_para, msg_area);
         }
@@ -801,7 +855,10 @@ async fn do_save(state: &mut AppState) {
     state.sriov_state.edit_focus = None;
     match state.sriov_state.save_config() {
         Ok(()) => {
-            let mut msg = "✓ Config saved to /etc/perigee/sriov.toml".to_string();
+            let mut msg = format!(
+                "✓ Config saved to {}",
+                perigee_daemon::config::sriov_config_path().display()
+            );
             if crate::client::IpcClient::is_daemon_running() {
                 match crate::client::IpcClient::send(&Request::Reload).await {
                     Ok(Response::Ok) => {

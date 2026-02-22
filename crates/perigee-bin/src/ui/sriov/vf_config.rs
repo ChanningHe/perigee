@@ -1,14 +1,14 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Frame,
 };
 
 use super::EditFocus;
-use crate::ui::AppState;
+use crate::ui::{common, AppState};
 use perigee_sriov::config::MacStrategyConfig;
 
 // ── General tab fields ──
@@ -49,24 +49,33 @@ pub fn render_general(frame: &mut Frame, state: &AppState, area: Rect) {
         .map(|p| p.defaults.spoofchk)
         .unwrap_or(false);
 
-    let field_line = |idx: usize, label: &str, value: &str, hint: &str| -> Line<'static> {
+    let field_line = |idx: usize, label: &str, value: &str, is_editing: bool, hint: &str| -> Line<'static> {
         let is_active = cursor == idx;
         let indicator = if is_active { " ▸ " } else { "   " };
-        let label_style = Style::default().fg(Color::DarkGray);
-        let val_style = if is_active {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
+        let val_style = if is_editing {
+            common::style_editing()
+        } else if is_active {
+            common::style_selected()
         } else {
-            Style::default().fg(Color::White)
+            common::style_value()
         };
-        let hint_style = Style::default().fg(Color::DarkGray);
 
         Line::from(vec![
-            Span::styled(indicator.to_string(), label_style),
-            Span::styled(format!("{:<16}", label), label_style),
+            Span::styled(indicator.to_string(), if is_active {
+                Style::default().fg(common::SELECTED)
+            } else {
+                common::style_muted()
+            }),
+            Span::styled(format!("{:<16}", label), common::style_label()),
             Span::styled(value.to_string(), val_style),
-            Span::styled(format!("  {}", hint), hint_style),
+            Span::styled(
+                if is_active && !hint.is_empty() {
+                    format!("  {}", hint)
+                } else {
+                    String::new()
+                },
+                common::style_muted(),
+            ),
         ])
     };
 
@@ -76,62 +85,49 @@ pub fn render_general(frame: &mut Frame, state: &AppState, area: Rect) {
             FIELD_VF_COUNT,
             "VF Count:",
             &vf_count_display,
-            if cursor == FIELD_VF_COUNT {
-                "Enter to edit number"
-            } else {
-                ""
-            },
+            is_editing_vf_count,
+            "Enter to edit",
         ),
         Line::from(""),
         field_line(
             FIELD_MAC_STRATEGY,
             "MAC Strategy:",
             mac_strategy,
-            if cursor == FIELD_MAC_STRATEGY {
-                "Enter to cycle"
-            } else {
-                ""
-            },
+            false,
+            "Enter to cycle",
         ),
         Line::from(""),
         Line::from(Span::styled(
             "   ── Default VF Properties ──",
-            Style::default().fg(Color::DarkGray),
+            common::style_muted(),
         )),
         Line::from(""),
         field_line(
             FIELD_TRUST,
             "Trust:",
             if trust { "ON" } else { "OFF" },
-            if cursor == FIELD_TRUST {
-                "Enter to toggle"
-            } else {
-                ""
-            },
+            false,
+            "Enter to toggle",
         ),
         Line::from(""),
         field_line(
             FIELD_SPOOFCHK,
             "SpoofChk:",
             if spoofchk { "ON" } else { "OFF" },
-            if cursor == FIELD_SPOOFCHK {
-                "Enter to toggle"
-            } else {
-                ""
-            },
+            false,
+            "Enter to toggle",
         ),
     ];
 
     let para = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(Style::default().fg(common::BORDER)),
     );
     frame.render_widget(para, area);
 }
 
 pub fn handle_general_input(state: &mut AppState, key: KeyEvent) {
-    // Text editing mode for VF count
     if state.sriov_state.edit_focus == Some(EditFocus::GeneralVfCount) {
         match key.code {
             KeyCode::Char(c) if c.is_ascii_digit() => {
@@ -157,7 +153,6 @@ pub fn handle_general_input(state: &mut AppState, key: KeyEvent) {
         return;
     }
 
-    // Navigation mode
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => {
             if state.sriov_state.general_cursor > 0 {
@@ -218,11 +213,11 @@ pub fn render_vf_table(frame: &mut Frame, state: &AppState, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
         "   VF#  MAC               Trust  SpoofChk  VLAN   Override",
-        Style::default().fg(Color::DarkGray),
+        common::style_muted(),
     )));
     lines.push(Line::from(Span::styled(
         format!("   {}", "─".repeat(60)),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(common::BORDER),
     )));
 
     if let Some(profile) = profile {
@@ -258,75 +253,93 @@ pub fn render_vf_table(frame: &mut Frame, state: &AppState, area: Rect) {
             };
 
             let indicator = if is_selected { " ▸ " } else { "   " };
-            let style = if is_selected {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
+            let style = if is_editing_vlan {
+                common::style_editing()
+            } else if is_selected {
+                common::style_selected()
             } else if has_override {
-                Style::default().fg(Color::Yellow)
+                Style::default().fg(common::OVERRIDE_MARK)
             } else {
-                Style::default().fg(Color::Gray)
+                Style::default().fg(common::TEXT_DIM)
             };
 
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "{}{:>3}  {:<18} {:<6} {:<9} {:<6} {}",
-                    indicator,
-                    i,
-                    mac_str,
-                    if trust_val { "✓" } else { "✗" },
-                    if spoof_val { "✓" } else { "✗" },
-                    vlan_str,
-                    if has_override { "*" } else { "" },
+            let override_mark = if has_override {
+                Span::styled(" ●", Style::default().fg(common::OVERRIDE_MARK))
+            } else {
+                Span::raw("")
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(
+                        "{}{:>3}  {:<18} {:<6} {:<9} {:<6}",
+                        indicator,
+                        i,
+                        mac_str,
+                        if trust_val { "✓" } else { "✗" },
+                        if spoof_val { "✓" } else { "✗" },
+                        vlan_str,
+                    ),
+                    style,
                 ),
-                style,
-            )));
+                override_mark,
+            ]));
         }
 
         if num == 0 {
             lines.push(Line::from(Span::styled(
                 "   (Set VF count in General tab first)",
-                Style::default().fg(Color::DarkGray),
+                common::style_muted(),
             )));
         }
 
         // Scrollbar
-        let total = num;
-        if total > VF_TABLE_VISIBLE_ROWS {
-            let mut scrollbar_state = ScrollbarState::new(total).position(scroll);
+        if num > VF_TABLE_VISIBLE_ROWS {
+            let mut scrollbar_state = ScrollbarState::new(num).position(scroll);
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
             frame.render_stateful_widget(scrollbar, inner_chunks[1], &mut scrollbar_state);
         }
 
         lines.push(Line::from(""));
         if state.sriov_state.edit_focus == Some(EditFocus::VfVlanId) {
-            lines.push(Line::from(Span::styled(
-                "   Enter VLAN ID (1-4094), 0 or empty to remove. Enter: confirm  Esc: cancel",
-                Style::default().fg(Color::Yellow),
-            )));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "   VLAN ID (1-4094), 0/empty to remove.  ",
+                    common::style_editing(),
+                ),
+                Span::styled(" Enter ", Style::default().fg(common::KEY_FG).bg(common::KEY_BG).add_modifier(Modifier::BOLD)),
+                Span::styled(" confirm  ", common::style_muted()),
+                Span::styled(" Esc ", Style::default().fg(common::KEY_FG).bg(common::KEY_BG).add_modifier(Modifier::BOLD)),
+                Span::styled(" cancel", common::style_muted()),
+            ]));
         } else {
-            lines.push(Line::from(Span::styled(
-                "   t: toggle trust  s: toggle spoofchk  v: edit vlan ID  d: delete override",
-                Style::default().fg(Color::DarkGray),
-            )));
+            lines.push(Line::from(vec![
+                Span::styled(" t ", Style::default().fg(common::KEY_FG).bg(common::KEY_BG).add_modifier(Modifier::BOLD)),
+                Span::styled(" trust  ", common::style_muted()),
+                Span::styled(" s ", Style::default().fg(common::KEY_FG).bg(common::KEY_BG).add_modifier(Modifier::BOLD)),
+                Span::styled(" spoofchk  ", common::style_muted()),
+                Span::styled(" v ", Style::default().fg(common::KEY_FG).bg(common::KEY_BG).add_modifier(Modifier::BOLD)),
+                Span::styled(" vlan  ", common::style_muted()),
+                Span::styled(" d ", Style::default().fg(common::KEY_FG).bg(common::KEY_BG).add_modifier(Modifier::BOLD)),
+                Span::styled(" delete override", common::style_muted()),
+            ]));
         }
     } else {
         lines.push(Line::from(Span::styled(
             "   (Select a PF and configure General settings first)",
-            Style::default().fg(Color::DarkGray),
+            common::style_muted(),
         )));
     }
 
     let para = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(Style::default().fg(common::BORDER)),
     );
     frame.render_widget(para, inner_chunks[0]);
 }
 
 pub fn handle_vf_table_input(state: &mut AppState, key: KeyEvent) {
-    // VLAN ID text input mode
     if state.sriov_state.edit_focus == Some(EditFocus::VfVlanId) {
         match key.code {
             KeyCode::Char(c) if c.is_ascii_digit() => {
@@ -345,7 +358,6 @@ pub fn handle_vf_table_input(state: &mut AppState, key: KeyEvent) {
                 if let Some(ref mut profile) = state.sriov_state.editing_profile {
                     let existing = profile.vf.iter_mut().find(|o| o.index == vf_idx);
                     if vlan_id == 0 {
-                        // Remove VLAN
                         if let Some(o) = existing {
                             o.vlan = None;
                         }
@@ -379,7 +391,6 @@ pub fn handle_vf_table_input(state: &mut AppState, key: KeyEvent) {
         return;
     }
 
-    // Navigation mode
     let num_vfs = state
         .sriov_state
         .editing_profile
@@ -420,7 +431,6 @@ pub fn handle_vf_table_input(state: &mut AppState, key: KeyEvent) {
             });
         }
         KeyCode::Char('v') => {
-            // Enter VLAN ID editing mode, pre-fill with current value
             let vf_idx = state.sriov_state.vf_table_cursor as u32;
             let current_vlan = state
                 .sriov_state

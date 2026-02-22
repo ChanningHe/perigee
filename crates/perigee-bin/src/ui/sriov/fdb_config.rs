@@ -1,13 +1,13 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
 
-use crate::ui::AppState;
+use crate::ui::{common, AppState};
 use perigee_sriov::config::FdbMode;
 
 const FDB_MODE_COUNT: usize = 3;
@@ -50,7 +50,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "   FDB Management Mode:",
-        Style::default().fg(Color::White),
+        Style::default().fg(common::TEXT),
     )));
     lines.push(Line::from(""));
 
@@ -61,13 +61,11 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
 
         let indicator = if is_cursor { " ▸ " } else { "   " };
         let label_style = if is_cursor {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
+            common::style_selected()
         } else if is_current {
-            Style::default().fg(Color::White)
+            common::style_value()
         } else {
-            Style::default().fg(Color::Gray)
+            Style::default().fg(common::TEXT_DIM)
         };
 
         lines.push(Line::from(vec![
@@ -75,16 +73,16 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
             Span::styled(
                 format!("{} ", radio),
                 Style::default().fg(if is_current {
-                    Color::Green
+                    common::SUCCESS
                 } else {
-                    Color::DarkGray
+                    common::TEXT_MUTED
                 }),
             ),
             Span::styled(info.label.to_string(), label_style),
         ]));
         lines.push(Line::from(Span::styled(
             format!("      {}", info.desc),
-            Style::default().fg(Color::DarkGray),
+            common::style_muted(),
         )));
         lines.push(Line::from(""));
     }
@@ -92,7 +90,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     let para = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(Style::default().fg(common::BORDER)),
     );
     frame.render_widget(para, area);
 }
