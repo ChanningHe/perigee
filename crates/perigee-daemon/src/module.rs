@@ -1,15 +1,25 @@
 use async_trait::async_trait;
-use perigee_core::ipc::ModuleStatus;
+use perigee_core::ipc::{ModuleStatus, ProfileDetailStatus, ProfileEvent};
 use std::collections::HashMap;
 
 #[async_trait]
 pub trait Module: Send + Sync {
     fn name(&self) -> &str;
     async fn init(&mut self, config: &toml::Value) -> anyhow::Result<()>;
-    async fn apply(&self) -> anyhow::Result<()>;
+    async fn apply(&mut self) -> anyhow::Result<()>;
     async fn reload(&mut self, config: &toml::Value) -> anyhow::Result<()>;
     async fn shutdown(&self) -> anyhow::Result<()>;
     fn status(&self) -> ModuleStatus;
+
+    fn profile_detail(&self, _profile: &str) -> Option<ProfileDetailStatus> {
+        None
+    }
+    fn profile_events(&self, _profile: &str, _limit: usize) -> Vec<ProfileEvent> {
+        Vec::new()
+    }
+    fn retry_profile(&mut self, _profile: &str) -> anyhow::Result<()> {
+        anyhow::bail!("retry not supported")
+    }
 }
 
 pub struct ModuleRegistry {

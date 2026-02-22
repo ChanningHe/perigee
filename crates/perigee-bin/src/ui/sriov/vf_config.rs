@@ -1,54 +1,125 @@
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
-    layout::Rect,
-    style::{Color, Style},
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Frame,
 };
 
+use super::EditFocus;
 use crate::ui::AppState;
+use perigee_sriov::config::MacStrategyConfig;
+
+// ── General tab fields ──
+
+const GENERAL_FIELDS: usize = 4;
+const FIELD_VF_COUNT: usize = 0;
+const FIELD_MAC_STRATEGY: usize = 1;
+const FIELD_TRUST: usize = 2;
+const FIELD_SPOOFCHK: usize = 3;
 
 pub fn render_general(frame: &mut Frame, state: &AppState, area: Rect) {
     let profile = &state.sriov_state.editing_profile;
-    let (num_vfs, mac_strategy, trust, spoofchk) = match profile {
-        Some(p) => (
-            p.num_vfs.to_string(),
-            format!("{:?}", p.mac_strategy),
-            if p.defaults.trust { "on" } else { "off" },
-            if p.defaults.spoofchk { "on" } else { "off" },
-        ),
-        None => (
-            "0".to_string(),
-            "Sequential".to_string(),
-            "on",
-            "off",
-        ),
+    let cursor = state.sriov_state.general_cursor;
+    let is_editing_vf_count = state.sriov_state.edit_focus == Some(EditFocus::GeneralVfCount);
+
+    let vf_count_display = if is_editing_vf_count {
+        format!("[{}▎]", &state.sriov_state.vf_count_buf)
+    } else {
+        let val = profile.as_ref().map(|p| p.num_vfs).unwrap_or(0);
+        format!("[{}]", val)
+    };
+
+    let mac_strategy = profile
+        .as_ref()
+        .map(|p| match p.mac_strategy {
+            MacStrategyConfig::Sequential => "Sequential",
+            MacStrategyConfig::Random => "Random",
+            MacStrategyConfig::Custom => "Custom",
+        })
+        .unwrap_or("Sequential");
+
+    let trust = profile
+        .as_ref()
+        .map(|p| p.defaults.trust)
+        .unwrap_or(true);
+    let spoofchk = profile
+        .as_ref()
+        .map(|p| p.defaults.spoofchk)
+        .unwrap_or(false);
+
+    let field_line = |idx: usize, label: &str, value: &str, hint: &str| -> Line<'static> {
+        let is_active = cursor == idx;
+        let indicator = if is_active { " ▸ " } else { "   " };
+        let label_style = Style::default().fg(Color::DarkGray);
+        let val_style = if is_active {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let hint_style = Style::default().fg(Color::DarkGray);
+
+        Line::from(vec![
+            Span::styled(indicator.to_string(), label_style),
+            Span::styled(format!("{:<16}", label), label_style),
+            Span::styled(value.to_string(), val_style),
+            Span::styled(format!("  {}", hint), hint_style),
+        ])
     };
 
     let lines = vec![
-        Line::from(vec![
-            Span::styled("  VF Count:     ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("[{}]", num_vfs), Style::default().fg(Color::White)),
-        ]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  MAC Strategy: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(mac_strategy, Style::default().fg(Color::White)),
-        ]),
+        field_line(
+            FIELD_VF_COUNT,
+            "VF Count:",
+            &vf_count_display,
+            if cursor == FIELD_VF_COUNT {
+                "Enter to edit number"
+            } else {
+                ""
+            },
+        ),
+        Line::from(""),
+        field_line(
+            FIELD_MAC_STRATEGY,
+            "MAC Strategy:",
+            mac_strategy,
+            if cursor == FIELD_MAC_STRATEGY {
+                "Enter to cycle"
+            } else {
+                ""
+            },
+        ),
         Line::from(""),
         Line::from(Span::styled(
-            "  ── Default VF Properties ──",
+            "   ── Default VF Properties ──",
             Style::default().fg(Color::DarkGray),
         )),
-        Line::from(vec![
-            Span::styled("  Trust:        ", Style::default().fg(Color::DarkGray)),
-            Span::styled(trust, Style::default().fg(Color::White)),
-        ]),
-        Line::from(vec![
-            Span::styled("  SpoofChk:     ", Style::default().fg(Color::DarkGray)),
-            Span::styled(spoofchk, Style::default().fg(Color::White)),
-        ]),
+        Line::from(""),
+        field_line(
+            FIELD_TRUST,
+            "Trust:",
+            if trust { "ON" } else { "OFF" },
+            if cursor == FIELD_TRUST {
+                "Enter to toggle"
+            } else {
+                ""
+            },
+        ),
+        Line::from(""),
+        field_line(
+            FIELD_SPOOFCHK,
+            "SpoofChk:",
+            if spoofchk { "ON" } else { "OFF" },
+            if cursor == FIELD_SPOOFCHK {
+                "Enter to toggle"
+            } else {
+                ""
+            },
+        ),
     ];
 
     let para = Paragraph::new(lines).block(
@@ -59,49 +130,189 @@ pub fn render_general(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(para, area);
 }
 
-pub fn handle_general_input(_state: &mut AppState, _key: KeyEvent) {
-    // TODO: implement field navigation and editing
+pub fn handle_general_input(state: &mut AppState, key: KeyEvent) {
+    // Text editing mode for VF count
+    if state.sriov_state.edit_focus == Some(EditFocus::GeneralVfCount) {
+        match key.code {
+            KeyCode::Char(c) if c.is_ascii_digit() => {
+                state.sriov_state.vf_count_buf.push(c);
+            }
+            KeyCode::Backspace => {
+                state.sriov_state.vf_count_buf.pop();
+            }
+            KeyCode::Enter => {
+                if let Ok(n) = state.sriov_state.vf_count_buf.parse::<u32>() {
+                    if let Some(ref mut profile) = state.sriov_state.editing_profile {
+                        profile.num_vfs = n;
+                    }
+                }
+                state.sriov_state.edit_focus = None;
+            }
+            KeyCode::Esc => {
+                state.sriov_state.sync_vf_count_buf();
+                state.sriov_state.edit_focus = None;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // Navigation mode
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            if state.sriov_state.general_cursor > 0 {
+                state.sriov_state.general_cursor -= 1;
+            } else {
+                state.sriov_state.general_cursor = GENERAL_FIELDS - 1;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            state.sriov_state.general_cursor =
+                (state.sriov_state.general_cursor + 1) % GENERAL_FIELDS;
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            ensure_editing_profile(state);
+            match state.sriov_state.general_cursor {
+                FIELD_VF_COUNT => {
+                    state.sriov_state.sync_vf_count_buf();
+                    state.sriov_state.edit_focus = Some(EditFocus::GeneralVfCount);
+                }
+                FIELD_MAC_STRATEGY => {
+                    if let Some(ref mut profile) = state.sriov_state.editing_profile {
+                        profile.mac_strategy = match profile.mac_strategy {
+                            MacStrategyConfig::Sequential => MacStrategyConfig::Random,
+                            MacStrategyConfig::Random => MacStrategyConfig::Custom,
+                            MacStrategyConfig::Custom => MacStrategyConfig::Sequential,
+                        };
+                    }
+                }
+                FIELD_TRUST => {
+                    if let Some(ref mut profile) = state.sriov_state.editing_profile {
+                        profile.defaults.trust = !profile.defaults.trust;
+                    }
+                }
+                FIELD_SPOOFCHK => {
+                    if let Some(ref mut profile) = state.sriov_state.editing_profile {
+                        profile.defaults.spoofchk = !profile.defaults.spoofchk;
+                    }
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
 }
+
+// ── VF Table tab ──
+
+const VF_TABLE_VISIBLE_ROWS: usize = 20;
 
 pub fn render_vf_table(frame: &mut Frame, state: &AppState, area: Rect) {
     let profile = &state.sriov_state.editing_profile;
 
-    let mut lines = vec![
-        Line::from(Span::styled(
-            "  Sel  VF#  MAC Address         Trust SpoofChk VLAN",
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::from(Span::styled(
-            "  ─────────────────────────────────────────────────",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
+    let inner_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "   VF#  MAC               Trust  SpoofChk  VLAN   Override",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("   {}", "─".repeat(60)),
+        Style::default().fg(Color::DarkGray),
+    )));
 
     if let Some(profile) = profile {
-        let num = profile.num_vfs.min(64);
-        for i in 0..num {
-            let has_override = profile.vf.iter().any(|o| o.index == i);
-            let override_marker = if has_override { " *" } else { "" };
-            let style = if has_override {
+        let num = profile.num_vfs.min(128) as usize;
+        let cursor = state.sriov_state.vf_table_cursor;
+        let scroll = state.sriov_state.vf_table_scroll;
+        let visible_end = (scroll + VF_TABLE_VISIBLE_ROWS).min(num);
+
+        for i in scroll..visible_end {
+            let is_selected = i == cursor;
+            let vf_override = profile.vf.iter().find(|o| o.index == i as u32);
+            let has_override = vf_override.is_some();
+
+            let trust_val = vf_override
+                .and_then(|o| o.trust)
+                .unwrap_or(profile.defaults.trust);
+            let spoof_val = vf_override
+                .and_then(|o| o.spoofchk)
+                .unwrap_or(profile.defaults.spoofchk);
+            let mac_str = vf_override
+                .and_then(|o| o.mac.as_ref())
+                .map(|m| m.to_string())
+                .unwrap_or_else(|| "(auto)".to_string());
+            let is_editing_vlan = is_selected
+                && state.sriov_state.edit_focus == Some(EditFocus::VfVlanId);
+            let vlan_str = if is_editing_vlan {
+                format!("[{}▎]", &state.sriov_state.vlan_id_buf)
+            } else {
+                vf_override
+                    .and_then(|o| o.vlan.as_ref())
+                    .map(|v| format!("{}", v.id))
+                    .unwrap_or_else(|| "-".to_string())
+            };
+
+            let indicator = if is_selected { " ▸ " } else { "   " };
+            let style = if is_selected {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else if has_override {
                 Style::default().fg(Color::Yellow)
             } else {
                 Style::default().fg(Color::Gray)
             };
+
             lines.push(Line::from(Span::styled(
                 format!(
-                    "  [ ] {:>3}   (auto)              {}    {}     {}{}",
+                    "{}{:>3}  {:<18} {:<6} {:<9} {:<6} {}",
+                    indicator,
                     i,
-                    if profile.defaults.trust { "✓" } else { "✗" },
-                    if profile.defaults.spoofchk { "✓" } else { "✗" },
-                    "-",
-                    override_marker,
+                    mac_str,
+                    if trust_val { "✓" } else { "✗" },
+                    if spoof_val { "✓" } else { "✗" },
+                    vlan_str,
+                    if has_override { "*" } else { "" },
                 ),
                 style,
             )));
         }
+
+        if num == 0 {
+            lines.push(Line::from(Span::styled(
+                "   (Set VF count in General tab first)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+
+        // Scrollbar
+        let total = num;
+        if total > VF_TABLE_VISIBLE_ROWS {
+            let mut scrollbar_state = ScrollbarState::new(total).position(scroll);
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
+            frame.render_stateful_widget(scrollbar, inner_chunks[1], &mut scrollbar_state);
+        }
+
+        lines.push(Line::from(""));
+        if state.sriov_state.edit_focus == Some(EditFocus::VfVlanId) {
+            lines.push(Line::from(Span::styled(
+                "   Enter VLAN ID (1-4094), 0 or empty to remove. Enter: confirm  Esc: cancel",
+                Style::default().fg(Color::Yellow),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "   t: toggle trust  s: toggle spoofchk  v: edit vlan ID  d: delete override",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
     } else {
         lines.push(Line::from(Span::styled(
-            "  (configure VF count in General tab first)",
+            "   (Select a PF and configure General settings first)",
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -111,9 +322,172 @@ pub fn render_vf_table(frame: &mut Frame, state: &AppState, area: Rect) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray)),
     );
-    frame.render_widget(para, area);
+    frame.render_widget(para, inner_chunks[0]);
 }
 
-pub fn handle_vf_table_input(_state: &mut AppState, _key: KeyEvent) {
-    // TODO: implement VF table interaction (select, edit, batch)
+pub fn handle_vf_table_input(state: &mut AppState, key: KeyEvent) {
+    // VLAN ID text input mode
+    if state.sriov_state.edit_focus == Some(EditFocus::VfVlanId) {
+        match key.code {
+            KeyCode::Char(c) if c.is_ascii_digit() => {
+                if state.sriov_state.vlan_id_buf.len() < 4 {
+                    state.sriov_state.vlan_id_buf.push(c);
+                }
+            }
+            KeyCode::Backspace => {
+                state.sriov_state.vlan_id_buf.pop();
+            }
+            KeyCode::Enter => {
+                let vf_idx = state.sriov_state.vf_table_cursor as u32;
+                let buf = state.sriov_state.vlan_id_buf.clone();
+                let vlan_id: u16 = buf.parse().unwrap_or(0);
+
+                if let Some(ref mut profile) = state.sriov_state.editing_profile {
+                    let existing = profile.vf.iter_mut().find(|o| o.index == vf_idx);
+                    if vlan_id == 0 {
+                        // Remove VLAN
+                        if let Some(o) = existing {
+                            o.vlan = None;
+                        }
+                    } else {
+                        let vlan = perigee_sriov::config::VlanConfig {
+                            id: vlan_id,
+                            qos: None,
+                            proto: None,
+                        };
+                        if let Some(o) = existing {
+                            o.vlan = Some(vlan);
+                        } else {
+                            profile.vf.push(perigee_sriov::config::VfOverride {
+                                index: vf_idx,
+                                mac: None,
+                                trust: None,
+                                spoofchk: None,
+                                vlan: Some(vlan),
+                            });
+                            profile.vf.sort_by_key(|o| o.index);
+                        }
+                    }
+                }
+                state.sriov_state.edit_focus = None;
+            }
+            KeyCode::Esc => {
+                state.sriov_state.edit_focus = None;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // Navigation mode
+    let num_vfs = state
+        .sriov_state
+        .editing_profile
+        .as_ref()
+        .map(|p| p.num_vfs.min(128) as usize)
+        .unwrap_or(0);
+
+    if num_vfs == 0 {
+        return;
+    }
+
+    let cursor = &mut state.sriov_state.vf_table_cursor;
+    let scroll = &mut state.sriov_state.vf_table_scroll;
+
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            if *cursor > 0 {
+                *cursor -= 1;
+            } else {
+                *cursor = num_vfs - 1;
+            }
+            adjust_scroll(*cursor, scroll);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            *cursor = (*cursor + 1) % num_vfs;
+            adjust_scroll(*cursor, scroll);
+        }
+        KeyCode::Char('t') => {
+            toggle_vf_field(state, |o, defaults| {
+                let current = o.trust.unwrap_or(defaults.trust);
+                o.trust = Some(!current);
+            });
+        }
+        KeyCode::Char('s') if key.modifiers.is_empty() => {
+            toggle_vf_field(state, |o, defaults| {
+                let current = o.spoofchk.unwrap_or(defaults.spoofchk);
+                o.spoofchk = Some(!current);
+            });
+        }
+        KeyCode::Char('v') => {
+            // Enter VLAN ID editing mode, pre-fill with current value
+            let vf_idx = state.sriov_state.vf_table_cursor as u32;
+            let current_vlan = state
+                .sriov_state
+                .editing_profile
+                .as_ref()
+                .and_then(|p| p.vf.iter().find(|o| o.index == vf_idx))
+                .and_then(|o| o.vlan.as_ref())
+                .map(|v| v.id.to_string())
+                .unwrap_or_default();
+            state.sriov_state.vlan_id_buf = current_vlan;
+            state.sriov_state.edit_focus = Some(EditFocus::VfVlanId);
+        }
+        KeyCode::Char('d') => {
+            let idx = state.sriov_state.vf_table_cursor as u32;
+            if let Some(ref mut profile) = state.sriov_state.editing_profile {
+                profile.vf.retain(|o| o.index != idx);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn adjust_scroll(cursor: usize, scroll: &mut usize) {
+    if cursor < *scroll {
+        *scroll = cursor;
+    } else if cursor >= *scroll + VF_TABLE_VISIBLE_ROWS {
+        *scroll = cursor + 1 - VF_TABLE_VISIBLE_ROWS;
+    }
+}
+
+fn toggle_vf_field(
+    state: &mut AppState,
+    f: impl FnOnce(
+        &mut perigee_sriov::config::VfOverride,
+        &perigee_sriov::config::VfDefaults,
+    ),
+) {
+    let vf_idx = state.sriov_state.vf_table_cursor as u32;
+    if let Some(ref mut profile) = state.sriov_state.editing_profile {
+        let defaults = profile.defaults.clone();
+        let existing = profile.vf.iter_mut().find(|o| o.index == vf_idx);
+        if let Some(o) = existing {
+            f(o, &defaults);
+        } else {
+            let mut new_override = perigee_sriov::config::VfOverride {
+                index: vf_idx,
+                mac: None,
+                trust: None,
+                spoofchk: None,
+                vlan: None,
+            };
+            f(&mut new_override, &defaults);
+            profile.vf.push(new_override);
+            profile.vf.sort_by_key(|o| o.index);
+        }
+    }
+}
+
+fn ensure_editing_profile(state: &mut AppState) {
+    if state.sriov_state.editing_profile.is_none() {
+        state.sriov_state.editing_profile = Some(perigee_sriov::config::SriovProfileConfig {
+            mac: perigee_core::mac::MacAddress::ZERO,
+            num_vfs: 0,
+            mac_strategy: MacStrategyConfig::Sequential,
+            defaults: perigee_sriov::config::VfDefaults::default(),
+            vf: Vec::new(),
+            fdb: perigee_sriov::config::FdbConfig::default(),
+        });
+    }
 }

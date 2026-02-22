@@ -156,31 +156,57 @@ async fn process_request(
             }
         }
         Request::Apply { profile } => {
-            let reg = registry.lock().await;
-            if let Some(_module) = reg.get("sriov") {
-                // TODO: per-profile apply via module trait extension
-                Response::Ok
+            let mut reg = registry.lock().await;
+            if let Some(module) = reg.get_mut("sriov") {
+                match module.retry_profile(&profile) {
+                    Ok(()) => Response::Ok,
+                    Err(e) => Response::Error {
+                        message: e.to_string(),
+                    },
+                }
             } else {
                 Response::Error {
-                    message: format!("profile '{}' not found", profile),
+                    message: format!("SR-IOV module not loaded"),
                 }
             }
         }
         Request::RetryFailed { profile } => {
-            // TODO: implement retry logic
-            Response::Error {
-                message: format!("retry not yet implemented for '{}'", profile),
+            let mut reg = registry.lock().await;
+            if let Some(module) = reg.get_mut("sriov") {
+                match module.retry_profile(&profile) {
+                    Ok(()) => Response::Ok,
+                    Err(e) => Response::Error {
+                        message: format!("retry failed for '{}': {}", profile, e),
+                    },
+                }
+            } else {
+                Response::Error {
+                    message: "SR-IOV module not loaded".to_string(),
+                }
             }
         }
         Request::ProfileStatus { profile } => {
-            // TODO: implement per-profile status
-            Response::Error {
-                message: format!("profile status not yet implemented for '{}'", profile),
+            let reg = registry.lock().await;
+            if let Some(module) = reg.get("sriov") {
+                match module.profile_detail(&profile) {
+                    Some(detail) => Response::ProfileDetail(detail),
+                    None => Response::Error {
+                        message: format!("profile '{}' not found", profile),
+                    },
+                }
+            } else {
+                Response::Error {
+                    message: "SR-IOV module not loaded".to_string(),
+                }
             }
         }
-        Request::ProfileEvents { profile: _, limit: _ } => {
-            // TODO: implement event log query
-            Response::Events(Vec::new())
+        Request::ProfileEvents { profile, limit } => {
+            let reg = registry.lock().await;
+            if let Some(module) = reg.get("sriov") {
+                Response::Events(module.profile_events(&profile, limit))
+            } else {
+                Response::Events(Vec::new())
+            }
         }
     }
 }

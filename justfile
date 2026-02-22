@@ -1,5 +1,5 @@
 # Perigee — build recipes
-# Requires: nix develop (provides rustc, cargo, just, zig, cargo-zigbuild)
+# Works inside `nix develop` shell or standalone (auto-detects nix env).
 
 set dotenv-load := false
 
@@ -56,8 +56,19 @@ dev:
 
 # ── Static release builds (cross-compile via cargo-zigbuild) ──
 
+# Ensure nix dev environment PATH is available
+[private]
+ensure-nix-env:
+    #!/usr/bin/env bash
+    if ! command -v cargo-zigbuild &>/dev/null; then
+        echo "cargo-zigbuild not found in PATH."
+        echo "Run inside 'nix develop' shell, or use 'just nix-build <arch>' instead."
+        exit 1
+    fi
+
 # Build static musl binary: just build [x86_64 | aarch64]
-build arch=default_target:
+# Must be run inside `nix develop` shell.
+build arch=default_target: ensure-nix-env
     #!/usr/bin/env bash
     set -euo pipefail
     TARGET=$(just resolve-target "{{arch}}")
@@ -72,8 +83,24 @@ build arch=default_target:
     fi
     echo "Done."
 
-# Build static debug binary
-build-debug arch=default_target:
+# Build outside nix shell — auto-loads nix dev env via nix print-dev-env.
+nix-build arch=default_target:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    NIXPATH=$(nix print-dev-env "$(pwd)" 2>/dev/null | grep "^PATH='/nix" | head -1 | sed "s/^PATH='//" | sed "s/'$//")
+    export PATH="$NIXPATH:/usr/bin:/bin:/usr/sbin:/sbin"
+    TARGET=$(just resolve-target "{{arch}}")
+    echo "Building perigee v{{version}} → ${TARGET} (nix-build)..."
+    cargo zigbuild --target "${TARGET}" --release
+    BIN="target/${TARGET}/release/perigee"
+    if [ -f "${BIN}" ]; then
+        SIZE=$(ls -lh "${BIN}" | awk '{print $5}')
+        echo "  ${BIN}  (${SIZE})"
+    fi
+    echo "Done."
+
+# Build static debug binary (inside nix develop shell)
+build-debug arch=default_target: ensure-nix-env
     #!/usr/bin/env bash
     set -euo pipefail
     TARGET=$(just resolve-target "{{arch}}")

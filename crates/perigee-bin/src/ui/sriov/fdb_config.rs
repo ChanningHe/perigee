@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::Rect,
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
     Frame,
@@ -10,56 +10,84 @@ use ratatui::{
 use crate::ui::AppState;
 use perigee_sriov::config::FdbMode;
 
+const FDB_MODE_COUNT: usize = 3;
+
+struct FdbModeInfo {
+    mode: FdbMode,
+    label: &'static str,
+    desc: &'static str,
+}
+
+const FDB_MODES: [FdbModeInfo; 3] = [
+    FdbModeInfo {
+        mode: FdbMode::DaemonWatch,
+        label: "Daemon Watch (recommended)",
+        desc: "Monitors /etc/pve/ and updates bridge FDB in real-time.",
+    },
+    FdbModeInfo {
+        mode: FdbMode::Hookscript,
+        label: "Hookscript",
+        desc: "Generate hookscript for manual VM attachment.",
+    },
+    FdbModeInfo {
+        mode: FdbMode::Disabled,
+        label: "Disabled",
+        desc: "No FDB management.",
+    },
+];
+
 pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
-    let mode = state
+    let current_mode = state
         .sriov_state
         .editing_profile
         .as_ref()
         .map(|p| &p.fdb.mode)
         .unwrap_or(&FdbMode::DaemonWatch);
 
-    let (dw, hs, dis) = match mode {
-        FdbMode::DaemonWatch => ("●", "○", "○"),
-        FdbMode::Hookscript => ("○", "●", "○"),
-        FdbMode::Disabled => ("○", "○", "●"),
-    };
+    let cursor = state.sriov_state.fdb_cursor;
 
-    let lines = vec![
-        Line::from(Span::styled(
-            "  FDB Management Mode:",
-            Style::default().fg(Color::White),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(format!("  {} ", dw), Style::default().fg(Color::Cyan)),
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "   FDB Management Mode:",
+        Style::default().fg(Color::White),
+    )));
+    lines.push(Line::from(""));
+
+    for (i, info) in FDB_MODES.iter().enumerate() {
+        let is_current = *current_mode == info.mode;
+        let is_cursor = i == cursor;
+        let radio = if is_current { "●" } else { "○" };
+
+        let indicator = if is_cursor { " ▸ " } else { "   " };
+        let label_style = if is_cursor {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if is_current {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(indicator.to_string(), label_style),
             Span::styled(
-                "Daemon Watch (recommended)",
-                Style::default().fg(Color::White),
+                format!("{} ", radio),
+                Style::default().fg(if is_current {
+                    Color::Green
+                } else {
+                    Color::DarkGray
+                }),
             ),
-        ]),
-        Line::from(Span::styled(
-            "    Monitors /etc/pve/ and updates bridge FDB in real-time.",
+            Span::styled(info.label.to_string(), label_style),
+        ]));
+        lines.push(Line::from(Span::styled(
+            format!("      {}", info.desc),
             Style::default().fg(Color::DarkGray),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(format!("  {} ", hs), Style::default().fg(Color::Cyan)),
-            Span::styled("Hookscript", Style::default().fg(Color::White)),
-        ]),
-        Line::from(Span::styled(
-            "    Generate hookscript for manual VM attachment.",
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(format!("  {} ", dis), Style::default().fg(Color::Cyan)),
-            Span::styled("Disabled", Style::default().fg(Color::White)),
-        ]),
-        Line::from(Span::styled(
-            "    No FDB management.",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
+        )));
+        lines.push(Line::from(""));
+    }
 
     let para = Paragraph::new(lines).block(
         Block::default()
@@ -70,12 +98,22 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
 }
 
 pub fn handle_input(state: &mut AppState, key: KeyEvent) {
-    if let Some(profile) = state.sriov_state.editing_profile.as_mut() {
-        match key.code {
-            KeyCode::Char('1') => profile.fdb.mode = FdbMode::DaemonWatch,
-            KeyCode::Char('2') => profile.fdb.mode = FdbMode::Hookscript,
-            KeyCode::Char('3') => profile.fdb.mode = FdbMode::Disabled,
-            _ => {}
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            if state.sriov_state.fdb_cursor > 0 {
+                state.sriov_state.fdb_cursor -= 1;
+            } else {
+                state.sriov_state.fdb_cursor = FDB_MODE_COUNT - 1;
+            }
         }
+        KeyCode::Down | KeyCode::Char('j') => {
+            state.sriov_state.fdb_cursor = (state.sriov_state.fdb_cursor + 1) % FDB_MODE_COUNT;
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            if let Some(ref mut profile) = state.sriov_state.editing_profile {
+                profile.fdb.mode = FDB_MODES[state.sriov_state.fdb_cursor].mode.clone();
+            }
+        }
+        _ => {}
     }
 }

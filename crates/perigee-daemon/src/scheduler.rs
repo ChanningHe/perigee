@@ -8,8 +8,8 @@ use crate::module::ModuleRegistry;
 /// Run boot-time apply for all registered modules.
 pub async fn boot_apply(registry: &Arc<Mutex<ModuleRegistry>>) -> Result<()> {
     info!("starting boot-time apply");
-    let reg = registry.lock().await;
-    for module in reg.all() {
+    let mut reg = registry.lock().await;
+    for module in reg.all_mut() {
         info!(module = module.name(), "applying module");
         if let Err(e) = module.apply().await {
             error!(module = module.name(), error = %e, "module apply failed");
@@ -32,6 +32,11 @@ pub async fn run_daemon(
     let server = crate::server::IpcServer::new(registry.clone(), config.clone());
     let shutdown_rx = shutdown_tx.subscribe();
 
+    // Tell systemd we're ready
+    crate::notify::sd_notify_ready();
+    crate::notify::sd_notify_status("running");
+    info!("daemon ready");
+
     tokio::select! {
         result = server.run(shutdown_rx) => {
             if let Err(e) = result {
@@ -44,7 +49,9 @@ pub async fn run_daemon(
         }
     }
 
-    // Shutdown all modules
+    // Graceful shutdown
+    crate::notify::sd_notify_stopping();
+
     let reg = registry.lock().await;
     for module in reg.all() {
         if let Err(e) = module.shutdown().await {

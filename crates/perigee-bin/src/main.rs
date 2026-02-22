@@ -49,7 +49,14 @@ async fn run_daemon() -> Result<()> {
         perigee_daemon::module::ModuleRegistry::new(),
     ));
 
-    // TODO: register SR-IOV module into registry
+    {
+        use perigee_daemon::module::Module;
+        let mut reg = registry.lock().await;
+        let mut sriov = perigee_daemon::sriov_module::SriovModule::new();
+        let cfg = config.lock().await;
+        sriov.init(&cfg).await?;
+        reg.register(Box::new(sriov));
+    }
 
     let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
     perigee_daemon::scheduler::run_daemon(registry, config, shutdown_tx).await
@@ -92,44 +99,87 @@ async fn handle_sriov_cli(action: SriovAction) -> Result<()> {
             Ok(())
         }
         SriovAction::Show { profile } => {
-            if !client::IpcClient::is_daemon_running() {
-                println!("Daemon is not running. Showing config-only info.");
-                // TODO: fallback to sysfs-only status
-            }
-            match client::IpcClient::send(&Request::ProfileStatus { profile: profile.clone() })
+            if client::IpcClient::is_daemon_running() {
+                match client::IpcClient::send(&Request::ProfileStatus {
+                    profile: profile.clone(),
+                })
                 .await
-            {
-                Ok(Response::ProfileDetail(detail)) => {
-                    println!("Profile:      {}", detail.name);
-                    println!(
-                        "PF:           {} ({})",
-                        detail.pf_iface.as_deref().unwrap_or("N/A"),
-                        detail.pf_mac
-                    );
-                    println!("State:        {}", detail.state);
-                    if let Some(ts) = &detail.last_applied {
-                        println!("Last Applied: {}", ts);
-                    }
-                    println!("\nVF Runtime Status:");
-                    for vf in &detail.vfs {
-                        let status = if vf.matches { "OK" } else { "MISMATCH" };
+                {
+                    Ok(Response::ProfileDetail(detail)) => {
+                        println!("Profile:      {}", detail.name);
                         println!(
-                            "  VF#{:<3} {} trust={} spoofchk={} {}",
-                            vf.index,
-                            vf.configured.mac,
-                            vf.configured.trust,
-                            vf.configured.spoofchk,
-                            status
+                            "PF:           {} ({})",
+                            detail.pf_iface.as_deref().unwrap_or("N/A"),
+                            detail.pf_mac
                         );
+                        println!("State:        {}", detail.state);
+                        if let Some(ts) = &detail.last_applied {
+                            println!("Last Applied: {}", ts);
+                        }
+                        println!("\nVF Runtime Status:");
+                        for vf in &detail.vfs {
+                            let status = if vf.matches { "OK" } else { "MISMATCH" };
+                            println!(
+                                "  VF#{:<3} {} trust={} spoofchk={} {}",
+                                vf.index,
+                                vf.configured.mac,
+                                vf.configured.trust,
+                                vf.configured.spoofchk,
+                                status
+                            );
+                        }
+                        println!(
+                            "\nFDB: {} | {} entries",
+                            detail.fdb.mode, detail.fdb.managed_entries
+                        );
+                        return Ok(());
                     }
-                    println!("\nFDB: {} | {} entries", detail.fdb.mode, detail.fdb.managed_entries);
+                    Ok(Response::Error { message }) => {
+                        eprintln!("Daemon error: {}", message);
+                    }
+                    _ => {
+                        eprintln!("Unexpected response from daemon");
+                    }
                 }
-                Ok(Response::Error { message }) => {
-                    eprintln!("Error: {}", message);
+            }
+
+            // Fallback: config-only + sysfs info
+            println!("(Daemon offline — showing config + sysfs info)\n");
+            let config_path = perigee_daemon::config::sriov_config_path();
+            if !config_path.exists() {
+                println!("No config found at {}", config_path.display());
+                return Ok(());
+            }
+            let config = perigee_sriov::config::SriovFileConfig::load(&config_path)?;
+            if let Some(p) = config.sriov.get(&profile) {
+                println!("Profile:      {}", profile);
+                println!("PF MAC:       {}", p.mac);
+                let pf_iface =
+                    perigee_core::sysfs::find_iface_by_mac(&p.mac.to_string()).ok();
+                println!(
+                    "PF Iface:     {}",
+                    pf_iface.as_deref().unwrap_or("not found")
+                );
+                println!("VF Count:     {}", p.num_vfs);
+                println!("MAC Strategy: {:?}", p.mac_strategy);
+                println!("Trust:        {}", if p.defaults.trust { "on" } else { "off" });
+                println!(
+                    "SpoofChk:     {}",
+                    if p.defaults.spoofchk { "on" } else { "off" }
+                );
+                println!("FDB Mode:     {:?}", p.fdb.mode);
+
+                if let Some(iface) = pf_iface {
+                    let current_vfs =
+                        perigee_core::sysfs::read_sriov_numvfs(&iface).unwrap_or(0);
+                    let max_vfs =
+                        perigee_core::sysfs::read_sriov_totalvfs(&iface).unwrap_or(0);
+                    println!("\nSysfs:");
+                    println!("  Current VFs: {}", current_vfs);
+                    println!("  Max VFs:     {}", max_vfs);
                 }
-                _ => {
-                    eprintln!("Unexpected response from daemon");
-                }
+            } else {
+                println!("Profile '{}' not found in config.", profile);
             }
             Ok(())
         }

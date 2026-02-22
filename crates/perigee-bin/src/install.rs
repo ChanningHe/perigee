@@ -15,10 +15,12 @@ DefaultDependencies=no
 
 [Service]
 Type=notify
+NotifyAccess=main
 ExecStart=/usr/local/bin/perigee daemon
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5s
+TimeoutStartSec=30
 
 [Install]
 WantedBy=multi-user.target
@@ -82,8 +84,23 @@ pub fn install(force: bool) -> Result<()> {
 
     // -- Enable & start --
     run_systemctl(&["daemon-reload"])?;
-    run_systemctl(&["enable", "--now", SERVICE_NAME])?;
-    println!("Service {} enabled and started.", SERVICE_NAME);
+    run_systemctl(&["enable", SERVICE_NAME])?;
+    println!("Service {} enabled.", SERVICE_NAME);
+
+    // Start separately so we can give a useful message on failure
+    match run_systemctl(&["start", SERVICE_NAME]) {
+        Ok(()) => {
+            println!("Service {} started.", SERVICE_NAME);
+        }
+        Err(_) => {
+            eprintln!();
+            eprintln!("Warning: service installed and enabled but failed to start.");
+            eprintln!("  Check logs:  journalctl -xeu {}", SERVICE_NAME);
+            eprintln!("  Check state: systemctl status {}", SERVICE_NAME);
+            eprintln!();
+            eprintln!("The service will attempt to start again on next boot.");
+        }
+    }
 
     Ok(())
 }

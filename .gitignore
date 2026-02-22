@@ -1,5 +1,6 @@
 dev/
 target/
+.direnv/
 result
 release-static/
 *.tar.gz
