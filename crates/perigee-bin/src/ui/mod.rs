@@ -22,17 +22,35 @@ pub struct AppState {
     pub daemon_online: bool,
     pub sriov_state: sriov::SriovState,
     pub host_info: perigee_core::sysinfo::HostInfo,
+    host_info_rx: Option<tokio::sync::oneshot::Receiver<perigee_core::sysinfo::HostInfo>>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         let daemon_online = crate::client::IpcClient::is_daemon_running();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::task::spawn_blocking(move || {
+            let _ = tx.send(perigee_core::sysinfo::HostInfo::gather());
+        });
         Self {
             screen: AppScreen::Home,
             should_quit: false,
             daemon_online,
             sriov_state: sriov::SriovState::new(),
-            host_info: perigee_core::sysinfo::HostInfo::gather(),
+            host_info: perigee_core::sysinfo::HostInfo::default(),
+            host_info_rx: Some(rx),
+        }
+    }
+
+    pub fn poll_host_info(&mut self) {
+        if let Some(mut rx) = self.host_info_rx.take() {
+            match rx.try_recv() {
+                Ok(info) => self.host_info = info,
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    self.host_info_rx = Some(rx);
+                }
+                Err(_) => {}
+            }
         }
     }
 }
@@ -60,6 +78,7 @@ pub async fn run_sriov_tui() -> Result<()> {
 
 async fn main_loop(terminal: &mut DefaultTerminal, state: &mut AppState) -> Result<()> {
     while !state.should_quit {
+        state.poll_host_info();
         terminal.draw(|frame| {
             match state.screen {
                 AppScreen::Home => home::render(frame, state),

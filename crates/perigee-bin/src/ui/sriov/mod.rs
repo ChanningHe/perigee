@@ -633,6 +633,7 @@ pub async fn handle_status_input(state: &mut AppState, key: KeyEvent, profile_id
                 state.sriov_state.active_tab = EditorTab::Pf;
                 state.sriov_state.reset_editor_cursors();
                 state.sriov_state.sync_vf_count_buf();
+                state.sriov_state.scan_pfs();
                 state.screen = AppScreen::SriovEditor(profile_idx);
             }
         }

@@ -89,28 +89,36 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     let hi = &state.host_info;
     let mut info_lines: Vec<Line> = Vec::new();
 
-    let kv = |label: &str, value: &str| -> Line<'static> {
-        let truncated = truncate_str(value, val_max);
-        Line::from(vec![
-            Span::styled(format!("  {:<14}", label), common::style_label()),
-            Span::styled(truncated, common::style_value()),
-        ])
-    };
+    let loading = hi.hostname.is_empty();
+    if loading {
+        info_lines.push(Line::from(Span::styled(
+            "  Loading system info...",
+            common::style_muted(),
+        )));
+    } else {
+        let kv = |label: &str, value: &str| -> Line<'static> {
+            let truncated = truncate_str(value, val_max);
+            Line::from(vec![
+                Span::styled(format!("  {:<14}", label), common::style_label()),
+                Span::styled(truncated, common::style_value()),
+            ])
+        };
 
-    info_lines.push(kv("Hostname:", &hi.hostname));
-    info_lines.push(kv("Kernel:", &hi.kernel));
-    if let Some(pve) = &hi.pve_version {
-        info_lines.push(kv("Proxmox VE:", pve));
+        info_lines.push(kv("Hostname:", &hi.hostname));
+        info_lines.push(kv("Kernel:", &hi.kernel));
+        if let Some(pve) = &hi.pve_version {
+            info_lines.push(kv("Proxmox VE:", pve));
+        }
+        info_lines.push(kv(
+            "CPU:",
+            &if hi.cpu_cores > 0 {
+                format!("{} ({}C)", hi.cpu_model, hi.cpu_cores)
+            } else {
+                hi.cpu_model.clone()
+            },
+        ));
+        info_lines.push(kv("Memory:", &hi.memory_str()));
     }
-    info_lines.push(kv(
-        "CPU:",
-        &if hi.cpu_cores > 0 {
-            format!("{} ({}C)", hi.cpu_model, hi.cpu_cores)
-        } else {
-            hi.cpu_model.clone()
-        },
-    ));
-    info_lines.push(kv("Memory:", &hi.memory_str()));
     let info_block = Paragraph::new(info_lines).block(
         Block::default()
             .title(Span::styled(
