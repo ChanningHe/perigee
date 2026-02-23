@@ -12,7 +12,7 @@ use super::{common, AppScreen, AppState};
 fn menu_items() -> Vec<(&'static str, &'static str)> {
     vec![
         perigee_sriov::module_info(),
-        // perigee_gpu::module_info(),  // future
+        perigee_affinity::module_info(),
     ]
 }
 
@@ -144,7 +144,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         .iter()
         .enumerate()
         .map(|(i, (name, desc))| {
-            let is_selected = i == 0;
+            let is_selected = i == state.home_cursor;
             let prefix = if is_selected { " ▸ " } else { "   " };
             let name_style = if is_selected {
                 common::style_selected()
@@ -198,13 +198,38 @@ fn truncate_str(s: &str, max: usize) -> String {
 }
 
 pub async fn handle_input(state: &mut AppState, key: KeyEvent) {
+    let module_count = menu_items().len();
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => state.should_quit = true,
-        KeyCode::Enter => {
-            state.screen = AppScreen::SriovProfiles;
-            state.sriov_state.load_profiles();
-            state.sriov_state.fetch_profile_statuses().await;
+        KeyCode::Up | KeyCode::Char('k') => {
+            if module_count > 0 {
+                state.home_cursor = if state.home_cursor == 0 {
+                    module_count - 1
+                } else {
+                    state.home_cursor - 1
+                };
+            }
         }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if module_count > 0 {
+                state.home_cursor = (state.home_cursor + 1) % module_count;
+            }
+        }
+        KeyCode::Enter => match state.home_cursor {
+            0 => {
+                state.screen = AppScreen::SriovProfiles;
+                state.sriov_state.load_profiles();
+                state.sriov_state.fetch_profile_statuses().await;
+            }
+            1 => {
+                if !state.affinity_state.data_ready {
+                    state.affinity_state.detect_topology();
+                    state.affinity_state.refresh_vms();
+                }
+                state.screen = AppScreen::AffinityTopology;
+            }
+            _ => {}
+        },
         _ => {}
     }
 }

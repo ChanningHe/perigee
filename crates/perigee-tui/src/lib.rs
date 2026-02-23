@@ -21,8 +21,8 @@ pub const WARN: Color = Color::Rgb(255, 183, 77);
 pub const ERROR: Color = Color::Rgb(255, 85, 85);
 pub const BORDER: Color = Color::Rgb(68, 68, 90);
 pub const SURFACE: Color = Color::Rgb(40, 42, 54);
-pub const KEY_BG: Color = Color::Rgb(80, 80, 110);
-pub const KEY_FG: Color = Color::White;
+pub const KEY_BG: Color = Color::Rgb(58, 62, 82);
+pub const KEY_FG: Color = Color::Rgb(180, 190, 220);
 pub const OVERRIDE_MARK: Color = Color::Rgb(189, 147, 249);
 
 // ── Style helpers ──

@@ -1,0 +1,20 @@
+[package]
+name = "perigee-affinity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+perigee-core = { path = "../../perigee-core" }
+perigee-daemon = { path = "../../perigee-daemon" }
+perigee-tui = { path = "../../perigee-tui" }
+ratatui.workspace = true
+crossterm.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+anyhow.workspace = true
+tracing.workspace = true

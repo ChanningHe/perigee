@@ -25,6 +25,9 @@
         src = ./.;
         cargoLock.lockFile = ./Cargo.lock;
         nativeBuildInputs = [ pkgs.pkg-config ];
+        preBuild = ''
+          export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-static"
+        '';
         meta = {
           description = "Proxmox VE helper tool - SR-IOV configuration & more";
           license = pkgs.lib.licenses.mit;

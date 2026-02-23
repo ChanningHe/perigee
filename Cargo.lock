@@ -699,6 +699,7 @@ dependencies = [
  "clap",
  "crossterm",
  "libc",
+ "perigee-affinity",
  "perigee-core",
  "perigee-daemon",
  "perigee-sriov",
@@ -710,6 +711,24 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "perigee-affinity"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "crossterm",
+ "perigee-core",
+ "perigee-daemon",
+ "perigee-tui",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tracing",
 ]
 
 [[package]]

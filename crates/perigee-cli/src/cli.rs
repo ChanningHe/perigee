@@ -37,6 +37,12 @@ pub enum Commands {
 
     /// Uninstall perigee systemd service
     Uninstall,
+
+    /// CPU affinity / core pinning (TUI or CLI)
+    Affinity {
+        #[command(subcommand)]
+        action: Option<AffinityAction>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -79,4 +85,53 @@ pub enum SriovAction {
 
     /// Generate FDB hookscript (fallback mode)
     FdbHookscript,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AffinityAction {
+    /// Show detected CPU topology
+    Topology {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Generate affinity string for given core count
+    Generate {
+        /// Number of cores (or vCPUs with --smt)
+        cores: usize,
+
+        /// Strategy to use
+        #[arg(long, default_value = "balanced")]
+        strategy: String,
+
+        /// Include SMT siblings
+        #[arg(long)]
+        smt: bool,
+    },
+
+    /// Apply affinity to a specific VM
+    Apply {
+        /// Target VM ID
+        vmid: u32,
+
+        /// Override core count (default: read from VM config)
+        #[arg(long)]
+        cores: Option<usize>,
+
+        /// Strategy to use
+        #[arg(long, default_value = "balanced")]
+        strategy: String,
+
+        /// Show command without executing
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Auto-apply balanced affinity to all VMs
+    AutoApply {
+        /// Show commands without executing
+        #[arg(long)]
+        dry_run: bool,
+    },
 }

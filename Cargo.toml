@@ -4,6 +4,7 @@ members = [
     "crates/perigee-core",
     "crates/perigee-daemon",
     "crates/modules/perigee-sriov",
+    "crates/modules/perigee-affinity",
     "crates/perigee-tui",
 ]
 resolver = "2"
