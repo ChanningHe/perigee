@@ -2,7 +2,12 @@ dev/
 target/
 dist/
 .direnv/
+
+# Nix build results
 result
+result/
 result-*
+bin/
+
 release-static/
 *.tar.gz

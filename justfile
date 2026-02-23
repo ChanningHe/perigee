@@ -76,21 +76,30 @@ package-all:
     just package x86_64
     just package aarch64
 
-# ── Nix build (works from any host, including macOS) ──
+# ── Nix build ──
 
-# Build via nix for a target system: just nix-build [x86_64 | aarch64]
+# Build static binary via nix: just nix-build [x86_64 | aarch64]
+# Auto-detects build system: native Linux uses local, macOS delegates to linux remote builder.
 nix-build arch="x86_64":
     #!/usr/bin/env bash
     set -euo pipefail
-    SYSTEM="{{ if arch == "aarch64" { "aarch64-linux" } else { "x86_64-linux" } }}"
-    echo "Building perigee v{{version}} via nix → ${SYSTEM}..."
-    nix build ".#packages.${SYSTEM}.default" -o "result-${SYSTEM}"
-    if [ -L "result-${SYSTEM}" ]; then
-        BIN="result-${SYSTEM}/bin/perigee"
+    HOST_ARCH=$(uname -m)
+    [ "$HOST_ARCH" = "arm64" ] && HOST_ARCH="aarch64"
+
+    if [ "$(uname -s)" = "Linux" ] && [ "$HOST_ARCH" = "{{arch}}" ]; then
+        SYSTEM="${HOST_ARCH}-linux"
+    else
+        SYSTEM="x86_64-linux"
+    fi
+
+    echo "Building perigee v{{version}} via nix → perigee-{{arch}} (${SYSTEM})..."
+    nix build ".#packages.${SYSTEM}.perigee-{{arch}}" -o "result-{{arch}}"
+    if [ -L "result-{{arch}}" ]; then
+        BIN="result-{{arch}}/bin/perigee"
         echo "  ${BIN}  ($(ls -lh "${BIN}" | awk '{print $5}'))"
     fi
 
-# Nix build for all architectures
+# Nix build for all architectures (both via x86_64-linux)
 nix-build-all:
     just nix-build x86_64
     just nix-build aarch64
