@@ -174,17 +174,18 @@ fn configure_single_vf(
         spoof_val,
     ])?;
 
-    // Set VLAN if configured
-    if let Some(vlan_cfg) = vlan {
+    // Always set VLAN: explicit id or 0 to clear stale VLAN
+    {
+        let vlan_id = vlan.map(|v| v.id).unwrap_or(0);
         let mut args = vec![
             "set".to_string(),
             pf.to_string(),
             "vf".to_string(),
             index.to_string(),
             "vlan".to_string(),
-            vlan_cfg.id.to_string(),
+            vlan_id.to_string(),
         ];
-        if let Some(qos) = vlan_cfg.qos {
+        if let Some(qos) = vlan.and_then(|v| v.qos) {
             args.push("qos".to_string());
             args.push(qos.to_string());
         }
@@ -192,8 +193,100 @@ fn configure_single_vf(
         run_ip_link(&args_ref)?;
     }
 
-    info!(pf = %pf, vf = index, mac = %mac, trust, spoofchk, "VF configured");
+    let vlan_str = vlan
+        .map(|v| {
+            if let Some(qos) = v.qos {
+                format!("{} qos={}", v.id, qos)
+            } else {
+                v.id.to_string()
+            }
+        })
+        .unwrap_or_else(|| "-".into());
+    info!(pf = %pf, vf = index, mac = %mac, trust, spoofchk, vlan = %vlan_str, "VF configured");
     Ok(())
+}
+
+/// Actual state of a single VF as read from `ip link show`.
+#[derive(Debug, Clone)]
+pub struct VfActualState {
+    pub index: u32,
+    pub mac: String,
+    pub trust: bool,
+    pub spoofchk: bool,
+    pub vlan_id: Option<u16>,
+}
+
+/// Read actual VF states from `ip -d link show <pf>`.
+pub fn read_actual_vf_states(pf_iface: &str) -> Result<Vec<VfActualState>> {
+    let output = std::process::Command::new("ip")
+        .args(["-d", "link", "show", pf_iface])
+        .output()
+        .context("failed to execute `ip link show`")?;
+
+    if !output.status.success() {
+        bail!(
+            "ip link show {} failed: {}",
+            pf_iface,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_vf_lines(&stdout))
+}
+
+fn parse_vf_lines(output: &str) -> Vec<VfActualState> {
+    let mut results = Vec::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("vf ") {
+            continue;
+        }
+        // "vf 3     link/ether 98:03:9b:95:b6:fc brd ..., vlan 120, spoof checking off, ... trust on, ..."
+        let parts: Vec<&str> = trimmed.splitn(2, "link/ether ").collect();
+        if parts.len() < 2 {
+            continue;
+        }
+
+        let index: u32 = trimmed
+            .strip_prefix("vf ")
+            .and_then(|s| s.split_whitespace().next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(u32::MAX);
+        if index == u32::MAX {
+            continue;
+        }
+
+        let rest = parts[1];
+        let mac = rest
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string();
+
+        let trust = rest.contains("trust on");
+        let spoofchk = rest.contains("spoof checking on");
+
+        let vlan_id = if let Some(pos) = rest.find(", vlan ") {
+            let after = &rest[pos + 7..];
+            after
+                .split(|c: char| !c.is_ascii_digit())
+                .next()
+                .and_then(|n| n.parse::<u16>().ok())
+                .filter(|&v| v > 0)
+        } else {
+            None
+        };
+
+        results.push(VfActualState {
+            index,
+            mac,
+            trust,
+            spoofchk,
+            vlan_id,
+        });
+    }
+    results
 }
 
 fn set_link_up(iface: &str) -> Result<()> {

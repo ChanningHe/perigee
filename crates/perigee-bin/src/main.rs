@@ -119,13 +119,25 @@ async fn handle_sriov_cli(action: SriovAction) -> Result<()> {
                         println!("\nVF Runtime Status:");
                         for vf in &detail.vfs {
                             let status = if vf.matches { "OK" } else { "MISMATCH" };
+                            let vlan_str = vf
+                                .configured
+                                .vlan_id
+                                .map(|id| id.to_string())
+                                .unwrap_or_else(|| "-".into());
                             println!(
-                                "  VF#{:<3} {} trust={} spoofchk={} {}",
+                                "  VF#{:<3} {} trust={:<5} spoofchk={:<5} vlan={:<6} {}",
                                 vf.index,
                                 vf.configured.mac,
                                 vf.configured.trust,
                                 vf.configured.spoofchk,
+                                vlan_str,
                                 status
+                            );
+                        }
+                        if detail.config_dirty {
+                            println!(
+                                "\n  ⚠ Config modified since last apply. Run `perigee sriov apply {}` to apply.",
+                                detail.name
                             );
                         }
                         println!(

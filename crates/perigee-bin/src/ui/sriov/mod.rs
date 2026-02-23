@@ -518,6 +518,12 @@ pub fn render_status(frame: &mut Frame, state: &AppState, profile_idx: usize) {
         let sc = common::state_color(&detail.state);
         lines.push(section_hdr("── Runtime ──"));
         lines.push(kv("State:", format!("{}", detail.state), sc));
+        if detail.config_dirty {
+            lines.push(Line::from(Span::styled(
+                "  ⚠ Config modified since last apply — press 'a' to apply.",
+                Style::default().fg(common::WARN),
+            )));
+        }
         if let Some(ref iface) = detail.pf_iface {
             lines.push(kv("PF Iface:", iface.clone(), common::TEXT));
         }
@@ -539,7 +545,7 @@ pub fn render_status(frame: &mut Frame, state: &AppState, profile_idx: usize) {
             lines.push(section_hdr("── VF Status ──"));
             lines.push(Line::from(Span::styled(
                 format!(
-                    "  {:>4}  {:<18} {:<6} {:<8} {:<6} {}",
+                    "  {:>4}  {:<18} {:<6} {:<8} {:<8} {}",
                     "VF#", "MAC", "Trust", "Spoof", "VLAN", "Status"
                 ),
                 common::style_muted(),
@@ -557,7 +563,7 @@ pub fn render_status(frame: &mut Frame, state: &AppState, profile_idx: usize) {
                 lines.push(Line::from(vec![
                     Span::styled(
                         format!(
-                            "  {:>4}  {:<18} {:<6} {:<8} {:<6} ",
+                            "  {:>4}  {:<18} {:<6} {:<8} {:<8} ",
                             vf.index,
                             &vf.configured.mac,
                             if vf.configured.trust { "✓" } else { "✗" },
@@ -772,15 +778,21 @@ pub fn render_editor(frame: &mut Frame, state: &AppState, profile_idx: usize) {
         }
     }
 
-    // Dynamic footer hints based on focus state
     let hints: Vec<(&str, &str)> = if state.sriov_state.edit_focus.is_some() {
         vec![("Enter", "Confirm"), ("Esc", "Cancel")]
+    } else if state.sriov_state.active_tab == EditorTab::Review {
+        vec![
+            ("Tab/◀▶", "Switch Tab"),
+            ("Ctrl+S", "Save Only"),
+            ("Enter", "Save & Apply"),
+            ("Esc", "Back"),
+        ]
     } else {
         vec![
             ("Tab/◀▶", "Switch Tab"),
             ("↑↓", "Navigate"),
             ("Enter", "Edit/Select"),
-            ("Ctrl+S", "Save"),
+            ("Ctrl+S", "Save Only"),
             ("Esc", "Back"),
         ]
     };
@@ -839,6 +851,10 @@ pub async fn handle_editor_input(
             do_save(state).await;
             return;
         }
+        KeyCode::Enter if state.sriov_state.active_tab == EditorTab::Review => {
+            do_save_and_apply(state).await;
+            return;
+        }
         _ => {}
     }
 
@@ -863,18 +879,57 @@ async fn do_save(state: &mut AppState) {
             if crate::client::IpcClient::is_daemon_running() {
                 match crate::client::IpcClient::send(&Request::Reload).await {
                     Ok(Response::Ok) => {
-                        msg.push_str(" — daemon reloaded.");
+                        msg.push_str(" — daemon config reloaded (not yet applied).");
                     }
                     Ok(Response::Error { message }) => {
-                        msg.push_str(&format!(" — daemon reload error: {}", message));
+                        msg.push_str(&format!(" — reload error: {}", message));
                     }
-                    _ => {
-                        msg.push_str(" — daemon reload: unexpected response.");
+                    _ => {}
+                }
+            }
+            state.sriov_state.message = Some(msg);
+            state.sriov_state.active_tab = EditorTab::Review;
+        }
+        Err(e) => {
+            state.sriov_state.message = Some(format!("✗ Save failed: {}", e));
+            state.sriov_state.active_tab = EditorTab::Review;
+        }
+    }
+}
+
+async fn do_save_and_apply(state: &mut AppState) {
+    state.sriov_state.edit_focus = None;
+    let profile_name = state.sriov_state.editing_name.trim().to_string();
+    match state.sriov_state.save_config() {
+        Ok(()) => {
+            let mut msg = "✓ Config saved".to_string();
+            if crate::client::IpcClient::is_daemon_running() {
+                match crate::client::IpcClient::send(&Request::Reload).await {
+                    Ok(Response::Ok) => {}
+                    Ok(Response::Error { message }) => {
+                        msg.push_str(&format!(", reload error: {}", message));
+                    }
+                    _ => {}
+                }
+                if !profile_name.is_empty() {
+                    match crate::client::IpcClient::send(&Request::Apply {
+                        profile: profile_name,
+                    })
+                    .await
+                    {
+                        Ok(Response::Ok) => {
+                            msg.push_str(" and applied to system.");
+                        }
+                        Ok(Response::Error { message }) => {
+                            msg.push_str(&format!(", apply error: {}", message));
+                        }
+                        _ => {
+                            msg.push_str(", apply: unexpected response.");
+                        }
                     }
                 }
             }
             state.sriov_state.message = Some(msg);
-            // Switch to Review tab to show the feedback
             state.sriov_state.active_tab = EditorTab::Review;
         }
         Err(e) => {

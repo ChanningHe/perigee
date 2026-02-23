@@ -23,6 +23,7 @@ struct ProfileRuntime {
     last_applied: Option<chrono::DateTime<Utc>>,
     last_error: Option<String>,
     events: Vec<ProfileEvent>,
+    config_dirty: bool,
 }
 
 pub struct SriovModule {
@@ -68,6 +69,7 @@ impl SriovModule {
             match apply_result {
                 Ok(Ok(result)) => {
                     rt.last_applied = Some(Utc::now());
+                    rt.config_dirty = false;
                     if result.is_success() {
                         rt.state = ProfileState::Active;
                         rt.last_error = None;
@@ -124,8 +126,19 @@ impl SriovModule {
                 Err(_) => continue,
             };
 
-            let bridge = detect_bridge_for_pf(&pf_iface);
-            let mgr = FdbManager::new(FdbMode::DaemonWatch, pf_iface.clone(), bridge.clone());
+            let bridge = match detect_bridge_for_pf(&pf_iface) {
+                Some(br) => br,
+                None => {
+                    info!(
+                        profile = %name,
+                        pf = %pf_iface,
+                        "FDB DaemonWatch skipped: PF is not a bridge port (add PF to a bridge to enable FDB sync)"
+                    );
+                    continue;
+                }
+            };
+
+            let mgr = FdbManager::new(FdbMode::DaemonWatch, pf_iface.clone(), Some(bridge.clone()));
 
             if let Err(e) = mgr.full_sync() {
                 warn!(profile = %name, error = %e, "FDB initial sync failed");
@@ -133,9 +146,8 @@ impl SriovModule {
 
             self.fdb_managers.push(mgr);
 
-            // Spawn an independent FDB watcher task
             let shutdown_rx = shutdown_tx.subscribe();
-            let watcher = FdbManager::new(FdbMode::DaemonWatch, pf_iface, bridge);
+            let watcher = FdbManager::new(FdbMode::DaemonWatch, pf_iface, Some(bridge));
             tokio::spawn(async move {
                 if let Err(e) = watcher.start_watcher(shutdown_rx).await {
                     error!(error = %e, "FDB watcher error");
@@ -180,6 +192,7 @@ impl SriovModule {
             pf_iface,
             pf_mac: rt.config.mac.to_string(),
             last_applied: rt.last_applied,
+            config_dirty: rt.config_dirty,
             vfs,
             fdb: fdb_status,
         })
@@ -206,6 +219,7 @@ impl SriovModule {
         match vf::apply_profile(profile_name, &rt.config) {
             Ok(result) => {
                 rt.last_applied = Some(Utc::now());
+                rt.config_dirty = false;
                 if result.is_success() {
                     rt.state = ProfileState::Active;
                     rt.last_error = None;
@@ -246,6 +260,7 @@ impl Module for SriovModule {
                     last_applied: None,
                     last_error: None,
                     events: Vec::new(),
+                    config_dirty: false,
                 },
             );
         }
@@ -269,9 +284,9 @@ impl Module for SriovModule {
         // Remove profiles no longer in config
         self.profiles.retain(|name, _| new_profiles.contains_key(name));
 
-        // Update existing and add new
         for (name, cfg) in new_profiles {
             if let Some(rt) = self.profiles.get_mut(&name) {
+                rt.config_dirty = true;
                 rt.config = cfg;
             } else {
                 self.profiles.insert(
@@ -284,6 +299,7 @@ impl Module for SriovModule {
                         last_applied: None,
                         last_error: None,
                         events: Vec::new(),
+                        config_dirty: true,
                     },
                 );
             }
@@ -353,8 +369,12 @@ fn push_event(events: &mut Vec<ProfileEvent>, level: EventLevel, message: String
 
 fn build_vf_status(
     config: &SriovProfileConfig,
-    _pf_iface: Option<&str>,
+    pf_iface: Option<&str>,
 ) -> Vec<VfRuntimeStatus> {
+    let actual_states = pf_iface
+        .and_then(|pf| vf::read_actual_vf_states(pf).ok())
+        .unwrap_or_default();
+
     let mut vfs = Vec::new();
     for i in 0..config.num_vfs {
         let vf_override = config.vf.iter().find(|o| o.index == i);
@@ -385,11 +405,30 @@ fn build_vf_status(
             vlan_qos,
         };
 
+        let actual_vf = actual_states.iter().find(|a| a.index == i);
+        let actual = actual_vf.map(|a| VfSnapshot {
+            mac: a.mac.clone(),
+            trust: a.trust,
+            spoofchk: a.spoofchk,
+            vlan_id: a.vlan_id,
+            vlan_qos: None,
+        });
+
+        let matches = if let Some(ref act) = actual {
+            let mac_ok = mac == "(auto)" || act.mac == configured.mac;
+            let trust_ok = act.trust == configured.trust;
+            let spoof_ok = act.spoofchk == configured.spoofchk;
+            let vlan_ok = act.vlan_id == configured.vlan_id;
+            mac_ok && trust_ok && spoof_ok && vlan_ok
+        } else {
+            false
+        };
+
         vfs.push(VfRuntimeStatus {
             index: i,
             configured,
-            actual: None, // Runtime readback not yet implemented
-            matches: true,
+            actual,
+            matches,
             last_error: None,
         });
     }

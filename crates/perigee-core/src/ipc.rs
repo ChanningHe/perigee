@@ -96,6 +96,7 @@ pub struct ProfileDetailStatus {
     pub pf_iface: Option<String>,
     pub pf_mac: String,
     pub last_applied: Option<DateTime<Utc>>,
+    pub config_dirty: bool,
     pub vfs: Vec<VfRuntimeStatus>,
     pub fdb: FdbRuntimeStatus,
 }

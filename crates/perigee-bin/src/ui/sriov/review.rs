@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::KeyEvent;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
@@ -114,24 +114,16 @@ fn render_summary(frame: &mut Frame, state: &AppState, area: Rect) {
 
         let all_ok = name_ok && mac_ok && vf_ok;
         if all_ok {
+            let key_style = Style::default()
+                .fg(common::KEY_FG)
+                .bg(common::KEY_BG)
+                .add_modifier(Modifier::BOLD);
             lines.push(Line::from(vec![
-                Span::styled("  Press ", common::style_muted()),
-                Span::styled(
-                    " Ctrl+S ",
-                    Style::default()
-                        .fg(common::KEY_FG)
-                        .bg(common::KEY_BG)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" or ", common::style_muted()),
-                Span::styled(
-                    " Enter ",
-                    Style::default()
-                        .fg(common::KEY_FG)
-                        .bg(common::KEY_BG)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" to Save & Apply", common::style_muted()),
+                Span::styled("  ", Style::default()),
+                Span::styled(" Ctrl+S ", key_style),
+                Span::styled(" Save config only  ", common::style_muted()),
+                Span::styled(" Enter ", key_style),
+                Span::styled(" Save & Apply to system", common::style_muted()),
             ]));
         } else {
             lines.push(Line::from(Span::styled(
@@ -219,28 +211,6 @@ fn render_toml_preview(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(para, area);
 }
 
-pub async fn handle_input(state: &mut AppState, key: KeyEvent) {
-    match key.code {
-        KeyCode::Enter => {
-            if state.sriov_state.editing_profile.is_some() {
-                match state.sriov_state.save_config() {
-                    Ok(()) => {
-                        state.sriov_state.message = Some("✓ Config saved.".to_string());
-                        if crate::client::IpcClient::is_daemon_running() {
-                            let _ = crate::client::IpcClient::send(
-                                &perigee_core::ipc::Request::Reload,
-                            )
-                            .await;
-                            state.sriov_state.message =
-                                Some("✓ Config saved. Reload sent to daemon.".to_string());
-                        }
-                    }
-                    Err(e) => {
-                        state.sriov_state.message = Some(format!("✗ Save failed: {}", e));
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
+pub async fn handle_input(_state: &mut AppState, _key: KeyEvent) {
+    // Enter on Review tab is handled by handle_editor_input (save & apply)
 }
