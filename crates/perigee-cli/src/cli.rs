@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "perigee",
     about = "Proxmox VE helper tool - SR-IOV configuration & more",
-    version
+    version = env!("PERIGEE_VERSION_STRING")
 )]
 pub struct Cli {
     #[command(subcommand)]

@@ -16,9 +16,11 @@
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
 
+        cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = [ "rust-src" "rust-analyzer" "clippy" "rustfmt" ];
-          targets = [
+          targets = pkgs.lib.optionals pkgs.stdenv.isLinux [
             "x86_64-unknown-linux-musl"
             "aarch64-unknown-linux-musl"
           ];
@@ -28,6 +30,15 @@
           pkgs.darwin.libiconv
           pkgs.apple-sdk
         ];
+
+        # Linux-only: musl cross-compilation toolchains
+        x86MuslCC = pkgs.pkgsCross.musl64.stdenv.cc;
+        aarch64MuslCC = pkgs.pkgsCross.aarch64-multiplatform-musl.stdenv.cc;
+
+        linuxBuildDeps = pkgs.lib.optionals pkgs.stdenv.isLinux [
+          x86MuslCC
+          aarch64MuslCC
+        ];
       in
       {
         devShells.default = pkgs.mkShell {
@@ -35,13 +46,15 @@
             rustToolchain
             pkgs.just
             pkgs.pkg-config
-            pkgs.zig
-            pkgs.cargo-zigbuild
-          ];
+            pkgs.git
+          ] ++ linuxBuildDeps;
           buildInputs = darwinDeps;
 
           env = {
             RUST_BACKTRACE = "1";
+          } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+            CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER = "${x86MuslCC}/bin/cc";
+            CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER = "${aarch64MuslCC}/bin/cc";
           };
 
           shellHook = ''
@@ -51,7 +64,7 @@
 
         packages.default = pkgs.rustPlatform.buildRustPackage {
           pname = "perigee";
-          version = "0.1.0";
+          version = cargoToml.workspace.package.version;
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
           nativeBuildInputs = [ pkgs.pkg-config ];

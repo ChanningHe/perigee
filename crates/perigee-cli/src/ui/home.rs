@@ -72,7 +72,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             Style::default().fg(common::TEXT_MUTED),
         ),
         Span::styled(
-            format!("  v{}", env!("CARGO_PKG_VERSION")),
+            format!("  v{}", env!("PERIGEE_VERSION_STRING")),
             Style::default().fg(common::BORDER),
         ),
     ]))

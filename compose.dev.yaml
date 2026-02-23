@@ -1,0 +1,26 @@
+services:
+  build-amd64:
+    build: { context: ., dockerfile: dev.Dockerfile }
+    platform: linux/amd64
+    volumes:
+      - .:/workspace
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target-amd64:/workspace/target
+    command: cargo build --target x86_64-unknown-linux-musl --release
+
+  build-arm64:
+    build: { context: ., dockerfile: dev.Dockerfile }
+    platform: linux/arm64
+    volumes:
+      - .:/workspace
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target-arm64:/workspace/target
+    command: cargo build --target aarch64-unknown-linux-musl --release
+
+volumes:
+  cargo-registry:
+  cargo-git:
+  target-amd64:
+  target-arm64:
