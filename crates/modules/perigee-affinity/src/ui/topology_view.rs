@@ -10,9 +10,10 @@ use ratatui::{
 
 use super::{AffinityScreen, AffinityState, AffinityUiAction};
 use crate::affinity::{cpus_to_ccd_names, parse_affinity_str};
+use crate::config::{AffinityFileConfig, affinity_config_path};
 use crate::topology::Architecture;
 
-pub fn render(frame: &mut Frame, daemon_online: bool, state: &AffinityState) {
+pub fn render(frame: &mut Frame, daemon_online: bool, state: &mut AffinityState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -47,7 +48,6 @@ pub fn render(frame: &mut Frame, daemon_online: bool, state: &AffinityState) {
             ])
         };
 
-        // CPU info (compact)
         lines.push(section("── CPU Info ──"));
         lines.push(kv("Architecture:", topo.architecture.to_string()));
         lines.push(kv(
@@ -59,9 +59,34 @@ pub fn render(frame: &mut Frame, daemon_online: bool, state: &AffinityState) {
                 if topo.has_smt { "✓" } else { "✗" }
             ),
         ));
+
+        let auto_enabled = AffinityFileConfig::load(&affinity_config_path())
+            .map(|c| c.affinity.auto_apply.enabled)
+            .unwrap_or(false);
+        lines.push(Line::from(vec![
+            Span::styled(
+                "  Auto Binding:  ",
+                common::style_label().add_modifier(Modifier::BOLD),
+            ),
+            if auto_enabled {
+                Span::styled(
+                    "Enabled",
+                    Style::default().fg(common::SUCCESS).add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled(
+                    "Disabled",
+                    Style::default().fg(common::ERROR).add_modifier(Modifier::BOLD),
+                )
+            },
+            Span::styled(
+                "  (press a to configure)",
+                Style::default().fg(common::TEXT_DIM),
+            ),
+        ]));
+
         lines.push(Line::from(""));
 
-        // CCD / Core Group listing with load bars
         let bindings = state.existing_bindings();
         let mut ccd_thread_count: Vec<usize> = vec![0; topo.core_groups.len()];
         let mut ccd_vm_count: Vec<usize> = vec![0; topo.core_groups.len()];
@@ -169,7 +194,10 @@ pub fn render(frame: &mut Frame, daemon_online: bool, state: &AffinityState) {
                                 Style::default().fg(common::TEXT_MUTED),
                             ),
                             Span::styled(
-                                format!("  {}", load_label(ccd_vm_count[global_idx], used, threads)),
+                                format!(
+                                    "  {}",
+                                    load_label(ccd_vm_count[global_idx], used, threads)
+                                ),
                                 Style::default().fg(common::TEXT_DIM),
                             ),
                         ]));
@@ -179,13 +207,12 @@ pub fn render(frame: &mut Frame, daemon_online: bool, state: &AffinityState) {
             }
         }
 
-        // VM Bindings table
         if !state.vms.is_empty() {
             lines.push(section("── VM Bindings ──"));
             lines.push(Line::from(Span::styled(
                 format!(
-                    "  {:<6} {:<14} {:<9} {:>5}  {:<20} {}",
-                    "VMID", "Name", "Status", "Cores", "Affinity", "CCD"
+                    "  {:<8} {:<16} {:>5}  {:<18} {}",
+                    "VMID", "Name", "Cores", "Affinity", "CCD"
                 ),
                 common::style_muted(),
             )));
@@ -199,33 +226,47 @@ pub fn render(frame: &mut Frame, daemon_online: bool, state: &AffinityState) {
                         bound += 1;
                         let cpus = parse_affinity_str(aff);
                         let ccds = cpus_to_ccd_names(&cpus, &topo.core_groups);
-                        (aff.to_string(), ccds.join(", "))
+                        let ccd_ids: Vec<String> = ccds
+                            .iter()
+                            .map(|n| extract_ccd_id(n))
+                            .collect();
+                        (aff.to_string(), format!("[{}]", ccd_ids.join(",")))
                     } else {
                         ("—".to_string(), "—".to_string())
                     };
 
-                let status_color = if vm.status == "running" {
-                    common::SUCCESS
+                let status_dot = if vm.status == "running" {
+                    Span::styled("● ", Style::default().fg(common::SUCCESS))
                 } else {
-                    common::TEXT_MUTED
+                    Span::styled("● ", Style::default().fg(common::TEXT_MUTED))
+                };
+
+                let name_display = if vm.name.len() > 14 {
+                    format!("{:.14}…", vm.name)
+                } else {
+                    vm.name.clone()
+                };
+
+                let aff_display = if aff_str.len() > 16 {
+                    format!("{:.16}…", aff_str)
+                } else {
+                    aff_str
                 };
 
                 lines.push(Line::from(vec![
-                    Span::styled(format!("  {:<6}", vm.vmid), common::style_value()),
+                    Span::raw("  "),
+                    status_dot,
+                    Span::styled(format!("{:<6}", vm.vmid), common::style_value()),
                     Span::styled(
-                        format!("{:<14}", vm.name),
+                        format!("{:<16}", name_display),
                         Style::default().fg(common::TEXT_DIM),
-                    ),
-                    Span::styled(
-                        format!("{:<9}", vm.status),
-                        Style::default().fg(status_color),
                     ),
                     Span::styled(
                         format!("{:>5}  ", cores),
                         Style::default().fg(common::TEXT_DIM),
                     ),
                     Span::styled(
-                        format!("{:<20} ", aff_str),
+                        format!("{:<18} ", aff_display),
                         Style::default().fg(common::TEXT_DIM),
                     ),
                     Span::styled(ccd_str, Style::default().fg(common::BRAND_DIM)),
@@ -248,6 +289,13 @@ pub fn render(frame: &mut Frame, daemon_online: bool, state: &AffinityState) {
             "  Loading topology...",
             common::style_muted(),
         )));
+    }
+
+    let visible_height = chunks[1].height.saturating_sub(2) as usize;
+    let max_scroll = lines.len().saturating_sub(visible_height);
+    state.topo_max_scroll = max_scroll;
+    if state.topo_scroll > max_scroll {
+        state.topo_scroll = max_scroll;
     }
 
     let para = Paragraph::new(lines)
@@ -275,7 +323,7 @@ fn load_bar_color(used: usize, total: usize) -> ratatui::style::Color {
     if used == 0 {
         common::SUCCESS
     } else if used >= total {
-        common::WARN
+        common::ERROR
     } else {
         common::BRAND
     }
@@ -288,6 +336,14 @@ fn load_label(vm_count: usize, used: usize, total: usize) -> String {
         let vm_word = if vm_count == 1 { "VM" } else { "VMs" };
         format!("{} {}, {}/{}", vm_count, vm_word, used, total)
     }
+}
+
+fn extract_ccd_id(name: &str) -> String {
+    name.strip_prefix("CCD ")
+        .or_else(|| name.strip_prefix("P-Core "))
+        .or_else(|| name.strip_prefix("E-Core "))
+        .unwrap_or(name)
+        .to_string()
 }
 
 pub fn handle_input(state: &mut AffinityState, key: KeyEvent) -> AffinityUiAction {
@@ -324,7 +380,9 @@ pub fn handle_input(state: &mut AffinityState, key: KeyEvent) -> AffinityUiActio
             AffinityUiAction::None
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            state.topo_scroll += 1;
+            if state.topo_scroll < state.topo_max_scroll {
+                state.topo_scroll += 1;
+            }
             AffinityUiAction::None
         }
         _ => AffinityUiAction::None,

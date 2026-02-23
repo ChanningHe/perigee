@@ -118,7 +118,7 @@ async fn main_loop(terminal: &mut DefaultTerminal, state: &mut AppState) -> Resu
                     perigee_sriov::ui::render_editor(frame, state.daemon_online, &state.sriov_state, usize::MAX)
                 }
                 AppScreen::AffinityTopology => {
-                    perigee_affinity::ui::render_topology(frame, state.daemon_online, &state.affinity_state)
+                    perigee_affinity::ui::render_topology(frame, state.daemon_online, &mut state.affinity_state)
                 }
                 AppScreen::AffinityStrategy => {
                     perigee_affinity::ui::render_strategy(frame, state.daemon_online, &state.affinity_state)

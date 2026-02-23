@@ -58,6 +58,7 @@ pub struct AffinityState {
     pub message: Option<String>,
 
     pub topo_scroll: usize,
+    pub topo_max_scroll: usize,
 
     topo_rx: Option<mpsc::Receiver<TopoResult>>,
     vms_rx: Option<mpsc::Receiver<VmsResult>>,
@@ -87,6 +88,7 @@ impl AffinityState {
             apply_result: None,
             message: None,
             topo_scroll: 0,
+            topo_max_scroll: 0,
             topo_rx: None,
             vms_rx: None,
             data_ready: false,
@@ -287,7 +289,7 @@ impl AffinityState {
 pub fn render_topology(
     frame: &mut ratatui::Frame,
     daemon_online: bool,
-    state: &AffinityState,
+    state: &mut AffinityState,
 ) {
     topology_view::render(frame, daemon_online, state);
 }
