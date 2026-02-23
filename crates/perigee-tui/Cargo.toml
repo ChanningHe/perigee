@@ -1,0 +1,11 @@
+[package]
+name = "perigee-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+perigee-core = { path = "../perigee-core" }
+ratatui.workspace = true
+crossterm.workspace = true

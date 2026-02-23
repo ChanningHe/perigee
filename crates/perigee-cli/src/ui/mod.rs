@@ -1,6 +1,5 @@
 pub mod common;
 pub mod home;
-pub mod sriov;
 pub mod tui;
 
 use anyhow::Result;
@@ -20,14 +19,14 @@ pub struct AppState {
     pub screen: AppScreen,
     pub should_quit: bool,
     pub daemon_online: bool,
-    pub sriov_state: sriov::SriovState,
+    pub sriov_state: perigee_sriov::ui::SriovState,
     pub host_info: perigee_core::sysinfo::HostInfo,
     host_info_rx: Option<tokio::sync::oneshot::Receiver<perigee_core::sysinfo::HostInfo>>,
 }
 
 impl AppState {
     pub fn new() -> Self {
-        let daemon_online = crate::client::IpcClient::is_daemon_running();
+        let daemon_online = perigee_core::client::IpcClient::is_daemon_running();
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::task::spawn_blocking(move || {
             let _ = tx.send(perigee_core::sysinfo::HostInfo::gather());
@@ -36,7 +35,7 @@ impl AppState {
             screen: AppScreen::Home,
             should_quit: false,
             daemon_online,
-            sriov_state: sriov::SriovState::new(),
+            sriov_state: perigee_sriov::ui::SriovState::new(),
             host_info: perigee_core::sysinfo::HostInfo::default(),
             host_info_rx: Some(rx),
         }
@@ -82,10 +81,18 @@ async fn main_loop(terminal: &mut DefaultTerminal, state: &mut AppState) -> Resu
         terminal.draw(|frame| {
             match state.screen {
                 AppScreen::Home => home::render(frame, state),
-                AppScreen::SriovProfiles => sriov::render_profiles(frame, state),
-                AppScreen::SriovStatus(idx) => sriov::render_status(frame, state, idx),
-                AppScreen::SriovEditor(idx) => sriov::render_editor(frame, state, idx),
-                AppScreen::SriovNewEditor => sriov::render_editor(frame, state, usize::MAX),
+                AppScreen::SriovProfiles => {
+                    perigee_sriov::ui::render_profiles(frame, state.daemon_online, &state.sriov_state)
+                }
+                AppScreen::SriovStatus(idx) => {
+                    perigee_sriov::ui::render_status(frame, state.daemon_online, &state.sriov_state, idx)
+                }
+                AppScreen::SriovEditor(idx) => {
+                    perigee_sriov::ui::render_editor(frame, state.daemon_online, &state.sriov_state, idx)
+                }
+                AppScreen::SriovNewEditor => {
+                    perigee_sriov::ui::render_editor(frame, state.daemon_online, &state.sriov_state, usize::MAX)
+                }
             }
         })?;
 
@@ -96,19 +103,51 @@ async fn main_loop(terminal: &mut DefaultTerminal, state: &mut AppState) -> Resu
                 }
                 match state.screen {
                     AppScreen::Home => home::handle_input(state, key).await,
-                    AppScreen::SriovProfiles => sriov::handle_profiles_input(state, key).await,
+                    AppScreen::SriovProfiles => {
+                        let action = perigee_sriov::ui::handle_profiles_input(
+                            &mut state.sriov_state, key,
+                        ).await;
+                        apply_sriov_action(state, action);
+                    }
                     AppScreen::SriovStatus(idx) => {
-                        sriov::handle_status_input(state, key, idx).await
+                        let action = perigee_sriov::ui::handle_status_input(
+                            &mut state.sriov_state, key, idx,
+                        ).await;
+                        apply_sriov_action(state, action);
                     }
                     AppScreen::SriovEditor(idx) => {
-                        sriov::handle_editor_input(state, key, Some(idx)).await
+                        let action = perigee_sriov::ui::handle_editor_input(
+                            &mut state.sriov_state, key, Some(idx),
+                        ).await;
+                        apply_sriov_action(state, action);
                     }
                     AppScreen::SriovNewEditor => {
-                        sriov::handle_editor_input(state, key, None).await
+                        let action = perigee_sriov::ui::handle_editor_input(
+                            &mut state.sriov_state, key, None,
+                        ).await;
+                        apply_sriov_action(state, action);
                     }
                 }
             }
         }
     }
     Ok(())
+}
+
+fn apply_sriov_action(state: &mut AppState, action: perigee_sriov::ui::SriovUiAction) {
+    use perigee_sriov::ui::{SriovUiAction, SriovScreen};
+    match action {
+        SriovUiAction::None => {}
+        SriovUiAction::GoBack => {
+            state.screen = AppScreen::Home;
+        }
+        SriovUiAction::NavigateTo(screen) => {
+            state.screen = match screen {
+                SriovScreen::Profiles => AppScreen::SriovProfiles,
+                SriovScreen::Status(i) => AppScreen::SriovStatus(i),
+                SriovScreen::Editor(i) => AppScreen::SriovEditor(i),
+                SriovScreen::NewEditor => AppScreen::SriovNewEditor,
+            };
+        }
+    }
 }

@@ -1,4 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent};
+use perigee_tui as common;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
@@ -7,9 +8,8 @@ use ratatui::{
     Frame,
 };
 
-use super::EditFocus;
-use crate::ui::{common, AppState};
-use perigee_sriov::config::MacStrategyConfig;
+use super::{EditFocus, SriovState};
+use crate::config::MacStrategyConfig;
 
 // ── General tab fields ──
 
@@ -19,13 +19,13 @@ const FIELD_MAC_STRATEGY: usize = 1;
 const FIELD_TRUST: usize = 2;
 const FIELD_SPOOFCHK: usize = 3;
 
-pub fn render_general(frame: &mut Frame, state: &AppState, area: Rect) {
-    let profile = &state.sriov_state.editing_profile;
-    let cursor = state.sriov_state.general_cursor;
-    let is_editing_vf_count = state.sriov_state.edit_focus == Some(EditFocus::GeneralVfCount);
+pub fn render_general(frame: &mut Frame, sriov: &SriovState, area: Rect) {
+    let profile = &sriov.editing_profile;
+    let cursor = sriov.general_cursor;
+    let is_editing_vf_count = sriov.edit_focus == Some(EditFocus::GeneralVfCount);
 
     let vf_count_display = if is_editing_vf_count {
-        format!("[{}▎]", &state.sriov_state.vf_count_buf)
+        format!("[{}▎]", &sriov.vf_count_buf)
     } else {
         let val = profile.as_ref().map(|p| p.num_vfs).unwrap_or(0);
         format!("[{}]", val)
@@ -127,26 +127,26 @@ pub fn render_general(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(para, area);
 }
 
-pub fn handle_general_input(state: &mut AppState, key: KeyEvent) {
-    if state.sriov_state.edit_focus == Some(EditFocus::GeneralVfCount) {
+pub fn handle_general_input(sriov: &mut SriovState, key: KeyEvent) {
+    if sriov.edit_focus == Some(EditFocus::GeneralVfCount) {
         match key.code {
             KeyCode::Char(c) if c.is_ascii_digit() => {
-                state.sriov_state.vf_count_buf.push(c);
+                sriov.vf_count_buf.push(c);
             }
             KeyCode::Backspace => {
-                state.sriov_state.vf_count_buf.pop();
+                sriov.vf_count_buf.pop();
             }
             KeyCode::Enter => {
-                if let Ok(n) = state.sriov_state.vf_count_buf.parse::<u32>() {
-                    if let Some(ref mut profile) = state.sriov_state.editing_profile {
+                if let Ok(n) = sriov.vf_count_buf.parse::<u32>() {
+                    if let Some(ref mut profile) = sriov.editing_profile {
                         profile.num_vfs = n;
                     }
                 }
-                state.sriov_state.edit_focus = None;
+                sriov.edit_focus = None;
             }
             KeyCode::Esc => {
-                state.sriov_state.sync_vf_count_buf();
-                state.sriov_state.edit_focus = None;
+                sriov.sync_vf_count_buf();
+                sriov.edit_focus = None;
             }
             _ => {}
         }
@@ -155,25 +155,25 @@ pub fn handle_general_input(state: &mut AppState, key: KeyEvent) {
 
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => {
-            if state.sriov_state.general_cursor > 0 {
-                state.sriov_state.general_cursor -= 1;
+            if sriov.general_cursor > 0 {
+                sriov.general_cursor -= 1;
             } else {
-                state.sriov_state.general_cursor = GENERAL_FIELDS - 1;
+                sriov.general_cursor = GENERAL_FIELDS - 1;
             }
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            state.sriov_state.general_cursor =
-                (state.sriov_state.general_cursor + 1) % GENERAL_FIELDS;
+            sriov.general_cursor =
+                (sriov.general_cursor + 1) % GENERAL_FIELDS;
         }
         KeyCode::Enter | KeyCode::Char(' ') => {
-            ensure_editing_profile(state);
-            match state.sriov_state.general_cursor {
+            ensure_editing_profile(sriov);
+            match sriov.general_cursor {
                 FIELD_VF_COUNT => {
-                    state.sriov_state.sync_vf_count_buf();
-                    state.sriov_state.edit_focus = Some(EditFocus::GeneralVfCount);
+                    sriov.sync_vf_count_buf();
+                    sriov.edit_focus = Some(EditFocus::GeneralVfCount);
                 }
                 FIELD_MAC_STRATEGY => {
-                    if let Some(ref mut profile) = state.sriov_state.editing_profile {
+                    if let Some(ref mut profile) = sriov.editing_profile {
                         profile.mac_strategy = match profile.mac_strategy {
                             MacStrategyConfig::Sequential => MacStrategyConfig::Random,
                             MacStrategyConfig::Random => MacStrategyConfig::Custom,
@@ -182,12 +182,12 @@ pub fn handle_general_input(state: &mut AppState, key: KeyEvent) {
                     }
                 }
                 FIELD_TRUST => {
-                    if let Some(ref mut profile) = state.sriov_state.editing_profile {
+                    if let Some(ref mut profile) = sriov.editing_profile {
                         profile.defaults.trust = !profile.defaults.trust;
                     }
                 }
                 FIELD_SPOOFCHK => {
-                    if let Some(ref mut profile) = state.sriov_state.editing_profile {
+                    if let Some(ref mut profile) = sriov.editing_profile {
                         profile.defaults.spoofchk = !profile.defaults.spoofchk;
                     }
                 }
@@ -202,8 +202,8 @@ pub fn handle_general_input(state: &mut AppState, key: KeyEvent) {
 
 const VF_TABLE_VISIBLE_ROWS: usize = 20;
 
-pub fn render_vf_table(frame: &mut Frame, state: &AppState, area: Rect) {
-    let profile = &state.sriov_state.editing_profile;
+pub fn render_vf_table(frame: &mut Frame, sriov: &SriovState, area: Rect) {
+    let profile = &sriov.editing_profile;
 
     let inner_chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -222,8 +222,8 @@ pub fn render_vf_table(frame: &mut Frame, state: &AppState, area: Rect) {
 
     if let Some(profile) = profile {
         let num = profile.num_vfs.min(128) as usize;
-        let cursor = state.sriov_state.vf_table_cursor;
-        let scroll = state.sriov_state.vf_table_scroll;
+        let cursor = sriov.vf_table_cursor;
+        let scroll = sriov.vf_table_scroll;
         let visible_end = (scroll + VF_TABLE_VISIBLE_ROWS).min(num);
 
         for i in scroll..visible_end {
@@ -242,9 +242,9 @@ pub fn render_vf_table(frame: &mut Frame, state: &AppState, area: Rect) {
                 .map(|m| m.to_string())
                 .unwrap_or_else(|| "(auto)".to_string());
             let is_editing_vlan = is_selected
-                && state.sriov_state.edit_focus == Some(EditFocus::VfVlanId);
+                && sriov.edit_focus == Some(EditFocus::VfVlanId);
             let vlan_str = if is_editing_vlan {
-                format!("[{}▎]", &state.sriov_state.vlan_id_buf)
+                format!("[{}▎]", &sriov.vlan_id_buf)
             } else {
                 vf_override
                     .and_then(|o| o.vlan.as_ref())
@@ -293,7 +293,6 @@ pub fn render_vf_table(frame: &mut Frame, state: &AppState, area: Rect) {
             )));
         }
 
-        // Scrollbar
         if num > VF_TABLE_VISIBLE_ROWS {
             let mut scrollbar_state = ScrollbarState::new(num).position(scroll);
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
@@ -301,7 +300,7 @@ pub fn render_vf_table(frame: &mut Frame, state: &AppState, area: Rect) {
         }
 
         lines.push(Line::from(""));
-        if state.sriov_state.edit_focus == Some(EditFocus::VfVlanId) {
+        if sriov.edit_focus == Some(EditFocus::VfVlanId) {
             lines.push(Line::from(vec![
                 Span::styled(
                     "   VLAN ID (1-4094), 0/empty to remove.  ",
@@ -339,30 +338,30 @@ pub fn render_vf_table(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(para, inner_chunks[0]);
 }
 
-pub fn handle_vf_table_input(state: &mut AppState, key: KeyEvent) {
-    if state.sriov_state.edit_focus == Some(EditFocus::VfVlanId) {
+pub fn handle_vf_table_input(sriov: &mut SriovState, key: KeyEvent) {
+    if sriov.edit_focus == Some(EditFocus::VfVlanId) {
         match key.code {
             KeyCode::Char(c) if c.is_ascii_digit() => {
-                if state.sriov_state.vlan_id_buf.len() < 4 {
-                    state.sriov_state.vlan_id_buf.push(c);
+                if sriov.vlan_id_buf.len() < 4 {
+                    sriov.vlan_id_buf.push(c);
                 }
             }
             KeyCode::Backspace => {
-                state.sriov_state.vlan_id_buf.pop();
+                sriov.vlan_id_buf.pop();
             }
             KeyCode::Enter => {
-                let vf_idx = state.sriov_state.vf_table_cursor as u32;
-                let buf = state.sriov_state.vlan_id_buf.clone();
+                let vf_idx = sriov.vf_table_cursor as u32;
+                let buf = sriov.vlan_id_buf.clone();
                 let vlan_id: u16 = buf.parse().unwrap_or(0);
 
-                if let Some(ref mut profile) = state.sriov_state.editing_profile {
+                if let Some(ref mut profile) = sriov.editing_profile {
                     let existing = profile.vf.iter_mut().find(|o| o.index == vf_idx);
                     if vlan_id == 0 {
                         if let Some(o) = existing {
                             o.vlan = None;
                         }
                     } else {
-                        let vlan = perigee_sriov::config::VlanConfig {
+                        let vlan = crate::config::VlanConfig {
                             id: vlan_id,
                             qos: None,
                             proto: None,
@@ -370,7 +369,7 @@ pub fn handle_vf_table_input(state: &mut AppState, key: KeyEvent) {
                         if let Some(o) = existing {
                             o.vlan = Some(vlan);
                         } else {
-                            profile.vf.push(perigee_sriov::config::VfOverride {
+                            profile.vf.push(crate::config::VfOverride {
                                 index: vf_idx,
                                 mac: None,
                                 trust: None,
@@ -381,18 +380,17 @@ pub fn handle_vf_table_input(state: &mut AppState, key: KeyEvent) {
                         }
                     }
                 }
-                state.sriov_state.edit_focus = None;
+                sriov.edit_focus = None;
             }
             KeyCode::Esc => {
-                state.sriov_state.edit_focus = None;
+                sriov.edit_focus = None;
             }
             _ => {}
         }
         return;
     }
 
-    let num_vfs = state
-        .sriov_state
+    let num_vfs = sriov
         .editing_profile
         .as_ref()
         .map(|p| p.num_vfs.min(128) as usize)
@@ -402,8 +400,8 @@ pub fn handle_vf_table_input(state: &mut AppState, key: KeyEvent) {
         return;
     }
 
-    let cursor = &mut state.sriov_state.vf_table_cursor;
-    let scroll = &mut state.sriov_state.vf_table_scroll;
+    let cursor = &mut sriov.vf_table_cursor;
+    let scroll = &mut sriov.vf_table_scroll;
 
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => {
@@ -419,33 +417,32 @@ pub fn handle_vf_table_input(state: &mut AppState, key: KeyEvent) {
             adjust_scroll(*cursor, scroll);
         }
         KeyCode::Char('t') => {
-            toggle_vf_field(state, |o, defaults| {
+            toggle_vf_field(sriov, |o, defaults| {
                 let current = o.trust.unwrap_or(defaults.trust);
                 o.trust = Some(!current);
             });
         }
         KeyCode::Char('s') if key.modifiers.is_empty() => {
-            toggle_vf_field(state, |o, defaults| {
+            toggle_vf_field(sriov, |o, defaults| {
                 let current = o.spoofchk.unwrap_or(defaults.spoofchk);
                 o.spoofchk = Some(!current);
             });
         }
         KeyCode::Char('v') => {
-            let vf_idx = state.sriov_state.vf_table_cursor as u32;
-            let current_vlan = state
-                .sriov_state
+            let vf_idx = sriov.vf_table_cursor as u32;
+            let current_vlan = sriov
                 .editing_profile
                 .as_ref()
                 .and_then(|p| p.vf.iter().find(|o| o.index == vf_idx))
                 .and_then(|o| o.vlan.as_ref())
                 .map(|v| v.id.to_string())
                 .unwrap_or_default();
-            state.sriov_state.vlan_id_buf = current_vlan;
-            state.sriov_state.edit_focus = Some(EditFocus::VfVlanId);
+            sriov.vlan_id_buf = current_vlan;
+            sriov.edit_focus = Some(EditFocus::VfVlanId);
         }
         KeyCode::Char('d') => {
-            let idx = state.sriov_state.vf_table_cursor as u32;
-            if let Some(ref mut profile) = state.sriov_state.editing_profile {
+            let idx = sriov.vf_table_cursor as u32;
+            if let Some(ref mut profile) = sriov.editing_profile {
                 profile.vf.retain(|o| o.index != idx);
             }
         }
@@ -462,20 +459,20 @@ fn adjust_scroll(cursor: usize, scroll: &mut usize) {
 }
 
 fn toggle_vf_field(
-    state: &mut AppState,
+    sriov: &mut SriovState,
     f: impl FnOnce(
-        &mut perigee_sriov::config::VfOverride,
-        &perigee_sriov::config::VfDefaults,
+        &mut crate::config::VfOverride,
+        &crate::config::VfDefaults,
     ),
 ) {
-    let vf_idx = state.sriov_state.vf_table_cursor as u32;
-    if let Some(ref mut profile) = state.sriov_state.editing_profile {
+    let vf_idx = sriov.vf_table_cursor as u32;
+    if let Some(ref mut profile) = sriov.editing_profile {
         let defaults = profile.defaults.clone();
         let existing = profile.vf.iter_mut().find(|o| o.index == vf_idx);
         if let Some(o) = existing {
             f(o, &defaults);
         } else {
-            let mut new_override = perigee_sriov::config::VfOverride {
+            let mut new_override = crate::config::VfOverride {
                 index: vf_idx,
                 mac: None,
                 trust: None,
@@ -489,15 +486,15 @@ fn toggle_vf_field(
     }
 }
 
-fn ensure_editing_profile(state: &mut AppState) {
-    if state.sriov_state.editing_profile.is_none() {
-        state.sriov_state.editing_profile = Some(perigee_sriov::config::SriovProfileConfig {
+fn ensure_editing_profile(sriov: &mut SriovState) {
+    if sriov.editing_profile.is_none() {
+        sriov.editing_profile = Some(crate::config::SriovProfileConfig {
             mac: perigee_core::mac::MacAddress::ZERO,
             num_vfs: 0,
             mac_strategy: MacStrategyConfig::Sequential,
-            defaults: perigee_sriov::config::VfDefaults::default(),
+            defaults: crate::config::VfDefaults::default(),
             vf: Vec::new(),
-            fdb: perigee_sriov::config::FdbConfig::default(),
+            fdb: crate::config::FdbConfig::default(),
         });
     }
 }

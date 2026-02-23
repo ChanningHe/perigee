@@ -1,4 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent};
+use perigee_tui as common;
 use ratatui::{
     layout::Rect,
     style::Style,
@@ -7,8 +8,8 @@ use ratatui::{
     Frame,
 };
 
-use crate::ui::{common, AppState};
-use perigee_sriov::config::FdbMode;
+use super::SriovState;
+use crate::config::FdbMode;
 
 const FDB_MODE_COUNT: usize = 3;
 
@@ -36,15 +37,14 @@ const FDB_MODES: [FdbModeInfo; 3] = [
     },
 ];
 
-pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
-    let current_mode = state
-        .sriov_state
+pub fn render(frame: &mut Frame, sriov: &SriovState, area: Rect) {
+    let current_mode = sriov
         .editing_profile
         .as_ref()
         .map(|p| &p.fdb.mode)
         .unwrap_or(&FdbMode::DaemonWatch);
 
-    let cursor = state.sriov_state.fdb_cursor;
+    let cursor = sriov.fdb_cursor;
 
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(""));
@@ -95,21 +95,21 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(para, area);
 }
 
-pub fn handle_input(state: &mut AppState, key: KeyEvent) {
+pub fn handle_input(sriov: &mut SriovState, key: KeyEvent) {
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => {
-            if state.sriov_state.fdb_cursor > 0 {
-                state.sriov_state.fdb_cursor -= 1;
+            if sriov.fdb_cursor > 0 {
+                sriov.fdb_cursor -= 1;
             } else {
-                state.sriov_state.fdb_cursor = FDB_MODE_COUNT - 1;
+                sriov.fdb_cursor = FDB_MODE_COUNT - 1;
             }
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            state.sriov_state.fdb_cursor = (state.sriov_state.fdb_cursor + 1) % FDB_MODE_COUNT;
+            sriov.fdb_cursor = (sriov.fdb_cursor + 1) % FDB_MODE_COUNT;
         }
         KeyCode::Enter | KeyCode::Char(' ') => {
-            if let Some(ref mut profile) = state.sriov_state.editing_profile {
-                profile.fdb.mode = FDB_MODES[state.sriov_state.fdb_cursor].mode.clone();
+            if let Some(ref mut profile) = sriov.editing_profile {
+                profile.fdb.mode = FDB_MODES[sriov.fdb_cursor].mode.clone();
             }
         }
         _ => {}

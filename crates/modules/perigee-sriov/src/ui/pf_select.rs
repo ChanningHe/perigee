@@ -1,4 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent};
+use perigee_tui as common;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::Style,
@@ -7,15 +8,15 @@ use ratatui::{
     Frame,
 };
 
-use crate::ui::{common, AppState};
+use super::SriovState;
 
-pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
+pub fn render(frame: &mut Frame, sriov: &SriovState, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(0)])
         .split(area);
 
-    let is_editing_name = state.sriov_state.edit_focus
+    let is_editing_name = sriov.edit_focus
         == Some(super::EditFocus::ProfileName);
 
     let name_style = if is_editing_name {
@@ -24,7 +25,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         common::style_value()
     };
 
-    let name_display = if state.sriov_state.editing_name.is_empty() && !is_editing_name {
+    let name_display = if sriov.editing_name.is_empty() && !is_editing_name {
         Line::from(vec![
             Span::styled("  Profile Name: ", common::style_label()),
             Span::styled("[", common::style_muted()),
@@ -37,7 +38,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
             Span::styled(
                 format!(
                     "[{}{}]",
-                    &state.sriov_state.editing_name,
+                    &sriov.editing_name,
                     if is_editing_name { "▎" } else { "" }
                 ),
                 name_style,
@@ -53,8 +54,8 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     );
     frame.render_widget(name_block, chunks[0]);
 
-    let pfs = &state.sriov_state.detected_pfs;
-    let selected = state.sriov_state.selected_pf;
+    let pfs = &sriov.detected_pfs;
+    let selected = sriov.selected_pf;
 
     let mut lines: Vec<Line> = Vec::new();
 
@@ -64,7 +65,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     )));
     lines.push(Line::from(""));
 
-    if let Some(err) = &state.sriov_state.pf_scan_error {
+    if let Some(err) = &sriov.pf_scan_error {
         lines.push(Line::from(Span::styled(
             format!("  Scan error: {}", err),
             common::style_error(),
@@ -137,7 +138,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
                             .unwrap_or_default()
                     ),
                     Style::default().fg(
-                        if pf.link_state == perigee_sriov::detect::LinkState::Up {
+                        if pf.link_state == crate::detect::LinkState::Up {
                             common::SUCCESS
                         } else {
                             common::WARN
@@ -156,53 +157,53 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(para, chunks[1]);
 }
 
-pub fn handle_input(state: &mut AppState, key: KeyEvent) {
-    let pf_count = state.sriov_state.detected_pfs.len();
+pub fn handle_input(sriov: &mut SriovState, key: KeyEvent) {
+    let pf_count = sriov.detected_pfs.len();
 
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => {
             if pf_count > 0 {
-                if state.sriov_state.selected_pf == 0 {
-                    state.sriov_state.selected_pf = pf_count - 1;
+                if sriov.selected_pf == 0 {
+                    sriov.selected_pf = pf_count - 1;
                 } else {
-                    state.sriov_state.selected_pf -= 1;
+                    sriov.selected_pf -= 1;
                 }
             }
         }
         KeyCode::Down | KeyCode::Char('j') => {
             if pf_count > 0 {
-                state.sriov_state.selected_pf = (state.sriov_state.selected_pf + 1) % pf_count;
+                sriov.selected_pf = (sriov.selected_pf + 1) % pf_count;
             }
         }
         KeyCode::Enter => {
-            if let Some(pf) = state.sriov_state.detected_pfs.get(state.sriov_state.selected_pf) {
+            if let Some(pf) = sriov.detected_pfs.get(sriov.selected_pf) {
                 let mac = pf.mac_address;
-                if let Some(ref mut profile) = state.sriov_state.editing_profile {
+                if let Some(ref mut profile) = sriov.editing_profile {
                     profile.mac = mac;
                 } else {
-                    state.sriov_state.editing_profile =
-                        Some(perigee_sriov::config::SriovProfileConfig {
+                    sriov.editing_profile =
+                        Some(crate::config::SriovProfileConfig {
                             mac,
                             num_vfs: pf.max_vfs.min(16),
-                            mac_strategy: perigee_sriov::config::MacStrategyConfig::Sequential,
-                            defaults: perigee_sriov::config::VfDefaults::default(),
+                            mac_strategy: crate::config::MacStrategyConfig::Sequential,
+                            defaults: crate::config::VfDefaults::default(),
                             vf: Vec::new(),
-                            fdb: perigee_sriov::config::FdbConfig::default(),
+                            fdb: crate::config::FdbConfig::default(),
                         });
                 }
-                if state.sriov_state.editing_name.is_empty() {
-                    state.sriov_state.editing_name = pf.iface_name.clone();
+                if sriov.editing_name.is_empty() {
+                    sriov.editing_name = pf.iface_name.clone();
                 }
             }
         }
         KeyCode::Char('r') => {
-            state.sriov_state.scan_pfs();
+            sriov.scan_pfs();
         }
         KeyCode::Char(c) if !c.is_control() => {
-            state.sriov_state.editing_name.push(c);
+            sriov.editing_name.push(c);
         }
         KeyCode::Backspace => {
-            state.sriov_state.editing_name.pop();
+            sriov.editing_name.pop();
         }
         _ => {}
     }

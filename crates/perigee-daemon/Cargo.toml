@@ -7,7 +7,6 @@ authors.workspace = true
 
 [dependencies]
 perigee-core = { path = "../perigee-core" }
-perigee-sriov = { path = "../perigee-sriov" }
 tokio.workspace = true
 async-trait.workspace = true
 serde.workspace = true

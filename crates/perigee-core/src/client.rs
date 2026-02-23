@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use perigee_core::ipc::{Request, Response, SOCKET_PATH};
+use crate::ipc::{Request, Response, SOCKET_PATH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 

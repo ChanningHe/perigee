@@ -8,10 +8,6 @@ pub fn config_dir() -> PathBuf {
     PathBuf::from(CONFIG_DIR)
 }
 
-pub fn sriov_config_path() -> PathBuf {
-    config_dir().join("sriov.toml")
-}
-
 /// Load all TOML config files from /etc/perigee/ and merge into a single toml::Value.
 pub fn load_all_configs() -> Result<toml::Value> {
     let dir = config_dir();

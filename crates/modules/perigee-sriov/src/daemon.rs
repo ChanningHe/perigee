@@ -5,14 +5,14 @@ use perigee_core::ipc::{
     EventLevel, FdbRuntimeStatus, ModuleState, ModuleStatus, ProfileDetailStatus, ProfileEvent,
     ProfileState, ProfileSummary, VfRuntimeStatus, VfSnapshot,
 };
-use perigee_sriov::config::{FdbMode, SriovFileConfig, SriovProfileConfig};
-use perigee_sriov::fdb::FdbManager;
-use perigee_sriov::vf;
+use crate::config::{sriov_config_path, FdbMode, SriovFileConfig, SriovProfileConfig};
+use crate::fdb::FdbManager;
+use crate::vf;
 use std::collections::BTreeMap;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
-use crate::module::Module;
+use perigee_daemon::module::Module;
 
 #[derive(Debug, Clone)]
 struct ProfileRuntime {
@@ -42,7 +42,7 @@ impl SriovModule {
     }
 
     fn load_profiles(_config: &toml::Value) -> BTreeMap<String, SriovProfileConfig> {
-        let path = crate::config::sriov_config_path();
+        let path = sriov_config_path();
         if !path.exists() {
             return BTreeMap::new();
         }
@@ -60,7 +60,6 @@ impl SriovModule {
             let profile_name = name.clone();
             let config = rt.config.clone();
 
-            // Run blocking sysfs/ip-link operations on a dedicated thread
             let apply_result = tokio::task::spawn_blocking(move || {
                 vf::apply_profile(&profile_name, &config)
             })
@@ -281,7 +280,6 @@ impl Module for SriovModule {
     async fn reload(&mut self, config: &toml::Value) -> Result<()> {
         let new_profiles = Self::load_profiles(config);
 
-        // Remove profiles no longer in config
         self.profiles.retain(|name, _| new_profiles.contains_key(name));
 
         for (name, cfg) in new_profiles {

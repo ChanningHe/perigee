@@ -1,5 +1,4 @@
 mod cli;
-mod client;
 mod install;
 mod ui;
 
@@ -50,12 +49,11 @@ async fn run_daemon() -> Result<()> {
     ));
 
     {
-        use perigee_daemon::module::Module;
         let mut reg = registry.lock().await;
-        let mut sriov = perigee_daemon::sriov_module::SriovModule::new();
+        let mut sriov = perigee_sriov::create_module();
         let cfg = config.lock().await;
         sriov.init(&cfg).await?;
-        reg.register(Box::new(sriov));
+        reg.register(sriov);
     }
 
     let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
@@ -67,7 +65,7 @@ async fn handle_sriov_cli(action: SriovAction) -> Result<()> {
 
     match action {
         SriovAction::List => {
-            let config_path = perigee_daemon::config::sriov_config_path();
+            let config_path = perigee_sriov::config::sriov_config_path();
             if !config_path.exists() {
                 println!("No SR-IOV profiles configured. Use 'perigee sriov' to create one.");
                 return Ok(());
@@ -79,8 +77,8 @@ async fn handle_sriov_cli(action: SriovAction) -> Result<()> {
             );
             println!("{}", "─".repeat(60));
             for (name, profile) in &config.sriov {
-                let status = if client::IpcClient::is_daemon_running() {
-                    match client::IpcClient::send(&Request::ProfileStatus {
+                let status = if perigee_core::client::IpcClient::is_daemon_running() {
+                    match perigee_core::client::IpcClient::send(&Request::ProfileStatus {
                         profile: name.clone(),
                     })
                     .await
@@ -99,8 +97,8 @@ async fn handle_sriov_cli(action: SriovAction) -> Result<()> {
             Ok(())
         }
         SriovAction::Show { profile } => {
-            if client::IpcClient::is_daemon_running() {
-                match client::IpcClient::send(&Request::ProfileStatus {
+            if perigee_core::client::IpcClient::is_daemon_running() {
+                match perigee_core::client::IpcClient::send(&Request::ProfileStatus {
                     profile: profile.clone(),
                 })
                 .await
@@ -157,7 +155,7 @@ async fn handle_sriov_cli(action: SriovAction) -> Result<()> {
 
             // Fallback: config-only + sysfs info
             println!("(Daemon offline — showing config + sysfs info)\n");
-            let config_path = perigee_daemon::config::sriov_config_path();
+            let config_path = perigee_sriov::config::sriov_config_path();
             if !config_path.exists() {
                 println!("No config found at {}", config_path.display());
                 return Ok(());
@@ -196,7 +194,7 @@ async fn handle_sriov_cli(action: SriovAction) -> Result<()> {
             Ok(())
         }
         SriovAction::Events { profile, limit } => {
-            let resp = client::IpcClient::send(&Request::ProfileEvents { profile, limit }).await?;
+            let resp = perigee_core::client::IpcClient::send(&Request::ProfileEvents { profile, limit }).await?;
             if let Response::Events(events) = resp {
                 for event in &events {
                     println!("{} [{}] {}", event.timestamp.format("%H:%M:%S"), event.level, event.message);
@@ -213,7 +211,7 @@ async fn handle_sriov_cli(action: SriovAction) -> Result<()> {
             Ok(())
         }
         SriovAction::Remove { profile } => {
-            let config_path = perigee_daemon::config::sriov_config_path();
+            let config_path = perigee_sriov::config::sriov_config_path();
             if !config_path.exists() {
                 println!("No config file found.");
                 return Ok(());
@@ -222,8 +220,8 @@ async fn handle_sriov_cli(action: SriovAction) -> Result<()> {
             if config.sriov.remove(&profile).is_some() {
                 config.save(&config_path)?;
                 println!("Profile '{}' removed.", profile);
-                if client::IpcClient::is_daemon_running() {
-                    let _ = client::IpcClient::send(&Request::Reload).await;
+                if perigee_core::client::IpcClient::is_daemon_running() {
+                    let _ = perigee_core::client::IpcClient::send(&Request::Reload).await;
                     println!("Daemon notified to reload.");
                 }
             } else {
@@ -232,7 +230,7 @@ async fn handle_sriov_cli(action: SriovAction) -> Result<()> {
             Ok(())
         }
         SriovAction::Retry { profile } => {
-            let resp = client::IpcClient::send(&Request::RetryFailed { profile }).await?;
+            let resp = perigee_core::client::IpcClient::send(&Request::RetryFailed { profile }).await?;
             match resp {
                 Response::Ok => println!("Retry initiated."),
                 Response::Error { message } => eprintln!("Error: {}", message),
@@ -243,7 +241,7 @@ async fn handle_sriov_cli(action: SriovAction) -> Result<()> {
         SriovAction::FdbHookscript => {
             let output = std::path::PathBuf::from("/var/lib/vz/snippets/perigee-bridgefix.sh");
             // Try to detect PF from existing config
-            let config_path = perigee_daemon::config::sriov_config_path();
+            let config_path = perigee_sriov::config::sriov_config_path();
             if config_path.exists() {
                 let config = perigee_sriov::config::SriovFileConfig::load(&config_path)?;
                 if let Some((_name, profile)) = config.sriov.iter().next() {
@@ -272,7 +270,7 @@ async fn handle_sriov_cli(action: SriovAction) -> Result<()> {
 async fn cmd_reload() -> Result<()> {
     use perigee_core::ipc::{Request, Response};
 
-    match client::IpcClient::send(&Request::Reload).await {
+    match perigee_core::client::IpcClient::send(&Request::Reload).await {
         Ok(Response::Ok) => {
             println!("Daemon reloaded successfully.");
             Ok(())
@@ -296,7 +294,7 @@ async fn cmd_reload() -> Result<()> {
 async fn cmd_status() -> Result<()> {
     use perigee_core::ipc::{Request, Response};
 
-    match client::IpcClient::send(&Request::Status).await {
+    match perigee_core::client::IpcClient::send(&Request::Status).await {
         Ok(Response::Status(status)) => {
             println!("Perigee Daemon");
             println!("  Uptime: {}s", status.uptime_secs);

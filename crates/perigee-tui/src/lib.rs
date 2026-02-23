@@ -8,14 +8,14 @@ use ratatui::{
 
 // ── Unified color palette ──
 
-pub const BRAND: Color = Color::Rgb(0, 215, 255); // Cyan accent
-pub const BRAND_DIM: Color = Color::Rgb(0, 135, 175); // Dimmed brand
+pub const BRAND: Color = Color::Rgb(0, 215, 255);
+pub const BRAND_DIM: Color = Color::Rgb(0, 135, 175);
 pub const TEXT: Color = Color::White;
 pub const TEXT_DIM: Color = Color::Gray;
 pub const TEXT_MUTED: Color = Color::DarkGray;
 pub const LABEL: Color = Color::Rgb(140, 140, 160);
 pub const SELECTED: Color = Color::Rgb(0, 215, 255);
-pub const EDITING: Color = Color::Rgb(255, 215, 0); // Gold for active editing
+pub const EDITING: Color = Color::Rgb(255, 215, 0);
 pub const SUCCESS: Color = Color::Rgb(80, 250, 123);
 pub const WARN: Color = Color::Rgb(255, 183, 77);
 pub const ERROR: Color = Color::Rgb(255, 85, 85);
@@ -23,7 +23,7 @@ pub const BORDER: Color = Color::Rgb(68, 68, 90);
 pub const SURFACE: Color = Color::Rgb(40, 42, 54);
 pub const KEY_BG: Color = Color::Rgb(80, 80, 110);
 pub const KEY_FG: Color = Color::White;
-pub const OVERRIDE_MARK: Color = Color::Rgb(189, 147, 249); // Purple for overrides
+pub const OVERRIDE_MARK: Color = Color::Rgb(189, 147, 249);
 
 // ── Style helpers ──
 

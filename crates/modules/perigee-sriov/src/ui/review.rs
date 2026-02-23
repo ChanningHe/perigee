@@ -1,4 +1,5 @@
 use crossterm::event::KeyEvent;
+use perigee_tui as common;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
@@ -7,19 +8,19 @@ use ratatui::{
     Frame,
 };
 
-use crate::ui::{common, AppState};
+use super::SriovState;
 
-pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
+pub fn render(frame: &mut Frame, sriov: &SriovState, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
-    render_summary(frame, state, chunks[0]);
-    render_toml_preview(frame, state, chunks[1]);
+    render_summary(frame, sriov, chunks[0]);
+    render_toml_preview(frame, sriov, chunks[1]);
 }
 
-fn render_summary(frame: &mut Frame, state: &AppState, area: Rect) {
+fn render_summary(frame: &mut Frame, sriov: &SriovState, area: Rect) {
     let mut lines = vec![
         Line::from(Span::styled(
             "  Configuration Review",
@@ -30,8 +31,8 @@ fn render_summary(frame: &mut Frame, state: &AppState, area: Rect) {
         Line::from(""),
     ];
 
-    if let Some(profile) = &state.sriov_state.editing_profile {
-        let name = &state.sriov_state.editing_name;
+    if let Some(profile) = &sriov.editing_profile {
+        let name = &sriov.editing_name;
         let name_ok = !name.trim().is_empty();
         let mac_ok = profile.mac.to_string() != "00:00:00:00:00:00";
         let vf_ok = profile.num_vfs > 0;
@@ -132,7 +133,7 @@ fn render_summary(frame: &mut Frame, state: &AppState, area: Rect) {
             )));
         }
 
-        if let Some(msg) = &state.sriov_state.message {
+        if let Some(msg) = &sriov.message {
             lines.push(Line::from(""));
             let msg_style = if msg.starts_with('✓') {
                 common::style_success()
@@ -163,17 +164,17 @@ fn render_summary(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(para, area);
 }
 
-fn render_toml_preview(frame: &mut Frame, state: &AppState, area: Rect) {
-    let lines = if let Some(profile) = &state.sriov_state.editing_profile {
-        let name = if state.sriov_state.editing_name.trim().is_empty() {
+fn render_toml_preview(frame: &mut Frame, sriov: &SriovState, area: Rect) {
+    let lines = if let Some(profile) = &sriov.editing_profile {
+        let name = if sriov.editing_name.trim().is_empty() {
             "unnamed"
         } else {
-            state.sriov_state.editing_name.trim()
+            sriov.editing_name.trim()
         };
 
         let mut map = std::collections::BTreeMap::new();
         map.insert(name.to_string(), profile.clone());
-        let file_config = perigee_sriov::config::SriovFileConfig { sriov: map };
+        let file_config = crate::config::SriovFileConfig { sriov: map };
 
         match toml::to_string_pretty(&file_config) {
             Ok(toml_str) => toml_str
@@ -211,6 +212,6 @@ fn render_toml_preview(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(para, area);
 }
 
-pub async fn handle_input(_state: &mut AppState, _key: KeyEvent) {
+pub fn handle_input(_sriov: &mut SriovState, _key: KeyEvent) {
     // Enter on Review tab is handled by handle_editor_input (save & apply)
 }

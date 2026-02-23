@@ -1,7 +1,13 @@
 use perigee_core::mac::MacAddress;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+const CONFIG_DIR: &str = "/etc/perigee";
+
+pub fn sriov_config_path() -> PathBuf {
+    PathBuf::from(CONFIG_DIR).join("sriov.toml")
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SriovFileConfig {

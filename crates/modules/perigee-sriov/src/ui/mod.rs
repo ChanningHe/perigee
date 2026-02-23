@@ -6,8 +6,9 @@ pub mod vf_config;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use perigee_core::ipc::{ProfileDetailStatus, ProfileState, Request, Response};
-use perigee_sriov::config::{SriovFileConfig, SriovProfileConfig};
-use perigee_sriov::detect::PhysicalFunction;
+use perigee_tui as common;
+use crate::config::{sriov_config_path, SriovFileConfig, SriovProfileConfig};
+use crate::detect::PhysicalFunction;
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Modifier, Style},
@@ -17,7 +18,22 @@ use ratatui::{
 };
 use std::collections::{BTreeMap, HashMap};
 
-use super::{common, AppScreen, AppState};
+// ── Navigation types (consumed by binary crate) ──
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SriovScreen {
+    Profiles,
+    Status(usize),
+    Editor(usize),
+    NewEditor,
+}
+
+#[derive(Debug)]
+pub enum SriovUiAction {
+    None,
+    NavigateTo(SriovScreen),
+    GoBack,
+}
 
 // ── SR-IOV state ──
 
@@ -52,8 +68,6 @@ impl EditorTab {
     }
 }
 
-/// Which field currently has text-editing focus.
-/// When Some(_), global keys (q, Esc, Left/Right) are suppressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditFocus {
     ProfileName,
@@ -69,30 +83,23 @@ pub struct SriovState {
     pub editing_name: String,
     pub message: Option<String>,
 
-    // PF tab
     pub detected_pfs: Vec<PhysicalFunction>,
     pub pf_scan_error: Option<String>,
     pub selected_pf: usize,
 
-    // General tab
     pub general_cursor: usize,
     pub vf_count_buf: String,
 
-    // VF Table tab
     pub vf_table_cursor: usize,
     pub vf_table_scroll: usize,
     pub vlan_id_buf: String,
 
-    // FDB tab
     pub fdb_cursor: usize,
 
-    // Focus mode
     pub edit_focus: Option<EditFocus>,
 
-    // Profile list status cache
     pub profile_statuses: HashMap<String, ProfileState>,
 
-    // Status view cache
     pub status_detail: Option<ProfileDetailStatus>,
     pub status_error: Option<String>,
 }
@@ -123,7 +130,7 @@ impl SriovState {
     }
 
     pub fn load_profiles(&mut self) {
-        let path = perigee_daemon::config::sriov_config_path();
+        let path = sriov_config_path();
         if path.exists() {
             if let Ok(config) = SriovFileConfig::load(&path) {
                 self.profiles = config.sriov.into_iter().collect();
@@ -135,11 +142,11 @@ impl SriovState {
     }
 
     pub async fn fetch_profile_statuses(&mut self) {
-        if !crate::client::IpcClient::is_daemon_running() {
+        if !perigee_core::client::IpcClient::is_daemon_running() {
             return;
         }
         if let Ok(Response::Status(status)) =
-            crate::client::IpcClient::send(&Request::Status).await
+            perigee_core::client::IpcClient::send(&Request::Status).await
         {
             for module in &status.modules {
                 if module.name == "sriov" {
@@ -153,7 +160,7 @@ impl SriovState {
     }
 
     pub fn scan_pfs(&mut self) {
-        match perigee_sriov::detect::scan_physical_functions() {
+        match crate::detect::scan_physical_functions() {
             Ok(pfs) => {
                 self.detected_pfs = pfs;
                 self.pf_scan_error = None;
@@ -176,7 +183,6 @@ impl SriovState {
         self.edit_focus = None;
     }
 
-    /// Sync vf_count_buf from editing_profile.
     pub fn sync_vf_count_buf(&mut self) {
         self.vf_count_buf = self
             .editing_profile
@@ -185,7 +191,6 @@ impl SriovState {
             .unwrap_or_default();
     }
 
-    /// Save the current editing_profile into the config file.
     pub fn save_config(&mut self) -> Result<(), String> {
         let profile = self
             .editing_profile
@@ -198,7 +203,7 @@ impl SriovState {
             self.editing_name.trim().to_string()
         };
 
-        let path = perigee_daemon::config::sriov_config_path();
+        let path = sriov_config_path();
         let mut file_config = if path.exists() {
             SriovFileConfig::load(&path).unwrap_or(SriovFileConfig {
                 sriov: BTreeMap::new(),
@@ -221,7 +226,7 @@ impl SriovState {
 
 // ── Profile list ──
 
-pub fn render_profiles(frame: &mut Frame, state: &AppState) {
+pub fn render_profiles(frame: &mut Frame, daemon_online: bool, sriov: &SriovState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -231,9 +236,9 @@ pub fn render_profiles(frame: &mut Frame, state: &AppState) {
         ])
         .split(frame.area());
 
-    common::header_bar(frame, chunks[0], "SR-IOV Profiles", state.daemon_online);
+    common::header_bar(frame, chunks[0], "SR-IOV Profiles", daemon_online);
 
-    if state.sriov_state.profiles.is_empty() {
+    if sriov.profiles.is_empty() {
         let empty = Paragraph::new(Line::from(vec![
             Span::styled("  No profiles configured. Press ", common::style_muted()),
             Span::styled(
@@ -263,17 +268,15 @@ pub fn render_profiles(frame: &mut Frame, state: &AppState) {
             common::style_muted(),
         ));
 
-        let items: Vec<ListItem> = state
-            .sriov_state
+        let items: Vec<ListItem> = sriov
             .profiles
             .iter()
             .enumerate()
             .map(|(i, (name, profile))| {
-                let selected = state.sriov_state.profile_list_state.selected() == Some(i);
+                let selected = sriov.profile_list_state.selected() == Some(i);
                 let prefix = if selected { " ▸ " } else { "   " };
 
-                let status = state
-                    .sriov_state
+                let status = sriov
                     .profile_statuses
                     .get(name)
                     .copied();
@@ -281,7 +284,7 @@ pub fn render_profiles(frame: &mut Frame, state: &AppState) {
                     .as_ref()
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| {
-                        if state.daemon_online {
+                        if daemon_online {
                             "—".to_string()
                         } else {
                             "offline".to_string()
@@ -350,8 +353,7 @@ pub fn render_profiles(frame: &mut Frame, state: &AppState) {
         frame.render_widget(list, inner_chunks[1]);
     }
 
-    // Show message if present
-    if let Some(msg) = &state.sriov_state.message {
+    if let Some(msg) = &sriov.message {
         let msg_area = ratatui::layout::Rect {
             x: chunks[1].x + 1,
             y: chunks[1].y + chunks[1].height.saturating_sub(2),
@@ -381,78 +383,77 @@ pub fn render_profiles(frame: &mut Frame, state: &AppState) {
     );
 }
 
-pub async fn handle_profiles_input(state: &mut AppState, key: KeyEvent) {
-    let len = state.sriov_state.profiles.len();
+pub async fn handle_profiles_input(sriov: &mut SriovState, key: KeyEvent) -> SriovUiAction {
+    let len = sriov.profiles.len();
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => {
-            state.screen = AppScreen::Home;
+            return SriovUiAction::GoBack;
         }
         KeyCode::Up | KeyCode::Char('k') => {
             if len > 0 {
-                let i = state
-                    .sriov_state
+                let i = sriov
                     .profile_list_state
                     .selected()
                     .unwrap_or(0);
                 let new = if i == 0 { len - 1 } else { i - 1 };
-                state.sriov_state.profile_list_state.select(Some(new));
+                sriov.profile_list_state.select(Some(new));
             }
         }
         KeyCode::Down | KeyCode::Char('j') => {
             if len > 0 {
-                let i = state
-                    .sriov_state
+                let i = sriov
                     .profile_list_state
                     .selected()
                     .unwrap_or(0);
                 let new = if i >= len - 1 { 0 } else { i + 1 };
-                state.sriov_state.profile_list_state.select(Some(new));
+                sriov.profile_list_state.select(Some(new));
             }
         }
         KeyCode::Enter | KeyCode::Char('s') => {
-            if let Some(idx) = state.sriov_state.profile_list_state.selected() {
-                state.sriov_state.status_detail = None;
-                state.sriov_state.status_error = None;
-                state.sriov_state.message = None;
-                state.screen = AppScreen::SriovStatus(idx);
-                fetch_profile_status(state, idx).await;
+            if let Some(idx) = sriov.profile_list_state.selected() {
+                sriov.status_detail = None;
+                sriov.status_error = None;
+                sriov.message = None;
+                fetch_profile_status(sriov, idx).await;
+                return SriovUiAction::NavigateTo(SriovScreen::Status(idx));
             }
         }
         KeyCode::Char('e') => {
-            if let Some(idx) = state.sriov_state.profile_list_state.selected() {
-                let (name, profile) = &state.sriov_state.profiles[idx];
-                state.sriov_state.editing_name = name.clone();
-                state.sriov_state.editing_profile = Some(profile.clone());
-                state.sriov_state.active_tab = EditorTab::Pf;
-                state.sriov_state.reset_editor_cursors();
-                state.sriov_state.sync_vf_count_buf();
-                state.sriov_state.scan_pfs();
-                state.screen = AppScreen::SriovEditor(idx);
+            if let Some(idx) = sriov.profile_list_state.selected() {
+                let (name, profile) = &sriov.profiles[idx];
+                sriov.editing_name = name.clone();
+                sriov.editing_profile = Some(profile.clone());
+                sriov.active_tab = EditorTab::Pf;
+                sriov.reset_editor_cursors();
+                sriov.sync_vf_count_buf();
+                sriov.scan_pfs();
+                return SriovUiAction::NavigateTo(SriovScreen::Editor(idx));
             }
         }
         KeyCode::Char('n') => {
-            state.sriov_state.editing_name.clear();
-            state.sriov_state.editing_profile = None;
-            state.sriov_state.active_tab = EditorTab::Pf;
-            state.sriov_state.reset_editor_cursors();
-            state.sriov_state.scan_pfs();
-            state.screen = AppScreen::SriovNewEditor;
+            sriov.editing_name.clear();
+            sriov.editing_profile = None;
+            sriov.active_tab = EditorTab::Pf;
+            sriov.reset_editor_cursors();
+            sriov.scan_pfs();
+            return SriovUiAction::NavigateTo(SriovScreen::NewEditor);
         }
         KeyCode::Char('r') => {
-            if crate::client::IpcClient::is_daemon_running() {
-                let _ = crate::client::IpcClient::send(&Request::Reload).await;
-                state.sriov_state.message = Some("Reload sent to daemon".to_string());
+            if perigee_core::client::IpcClient::is_daemon_running() {
+                let _ = perigee_core::client::IpcClient::send(&Request::Reload).await;
+                sriov.message = Some("Reload sent to daemon".to_string());
             }
-            state.sriov_state.load_profiles();
-            state.sriov_state.fetch_profile_statuses().await;
+            sriov.load_profiles();
+            sriov.fetch_profile_statuses().await;
         }
         _ => {}
     }
+    SriovUiAction::None
 }
 
 // ── Status view ──
 
-pub fn render_status(frame: &mut Frame, state: &AppState, profile_idx: usize) {
+pub fn render_status(frame: &mut Frame, daemon_online: bool, sriov: &SriovState, profile_idx: usize) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -462,10 +463,10 @@ pub fn render_status(frame: &mut Frame, state: &AppState, profile_idx: usize) {
         ])
         .split(frame.area());
 
-    let (profile_name, profile) = match state.sriov_state.profiles.get(profile_idx) {
+    let (profile_name, profile) = match sriov.profiles.get(profile_idx) {
         Some((n, p)) => (n.clone(), p.clone()),
         None => {
-            common::header_bar(frame, chunks[0], "SR-IOV > Status", state.daemon_online);
+            common::header_bar(frame, chunks[0], "SR-IOV > Status", daemon_online);
             let para = Paragraph::new("  Profile not found").block(
                 Block::default().borders(Borders::ALL),
             );
@@ -479,7 +480,7 @@ pub fn render_status(frame: &mut Frame, state: &AppState, profile_idx: usize) {
         frame,
         chunks[0],
         &format!("SR-IOV > {} > Status", profile_name),
-        state.daemon_online,
+        daemon_online,
     );
 
     let mut lines: Vec<Line> = Vec::new();
@@ -514,7 +515,7 @@ pub fn render_status(frame: &mut Frame, state: &AppState, profile_idx: usize) {
     ));
     lines.push(Line::from(""));
 
-    if let Some(detail) = &state.sriov_state.status_detail {
+    if let Some(detail) = &sriov.status_detail {
         let sc = common::state_color(&detail.state);
         lines.push(section_hdr("── Runtime ──"));
         lines.push(kv("State:", format!("{}", detail.state), sc));
@@ -585,20 +586,20 @@ pub fn render_status(frame: &mut Frame, state: &AppState, profile_idx: usize) {
                 )));
             }
         }
-    } else if let Some(err) = &state.sriov_state.status_error {
+    } else if let Some(err) = &sriov.status_error {
         lines.push(section_hdr("── Runtime ──"));
         lines.push(Line::from(Span::styled(
             format!("  {}", err),
             common::style_warn(),
         )));
-    } else if !state.daemon_online {
+    } else if !daemon_online {
         lines.push(Line::from(Span::styled(
             "  Daemon offline — no runtime status available.",
             common::style_warn(),
         )));
     }
 
-    if let Some(msg) = &state.sriov_state.message {
+    if let Some(msg) = &sriov.message {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             format!("  {}", msg),
@@ -625,93 +626,94 @@ pub fn render_status(frame: &mut Frame, state: &AppState, profile_idx: usize) {
     );
 }
 
-pub async fn handle_status_input(state: &mut AppState, key: KeyEvent, profile_idx: usize) {
+pub async fn handle_status_input(sriov: &mut SriovState, key: KeyEvent, profile_idx: usize) -> SriovUiAction {
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
-            state.sriov_state.status_detail = None;
-            state.sriov_state.status_error = None;
-            state.screen = AppScreen::SriovProfiles;
+            sriov.status_detail = None;
+            sriov.status_error = None;
+            return SriovUiAction::NavigateTo(SriovScreen::Profiles);
         }
         KeyCode::Char('e') => {
-            if let Some((name, profile)) = state.sriov_state.profiles.get(profile_idx) {
-                state.sriov_state.editing_name = name.clone();
-                state.sriov_state.editing_profile = Some(profile.clone());
-                state.sriov_state.active_tab = EditorTab::Pf;
-                state.sriov_state.reset_editor_cursors();
-                state.sriov_state.sync_vf_count_buf();
-                state.sriov_state.scan_pfs();
-                state.screen = AppScreen::SriovEditor(profile_idx);
+            if let Some((name, profile)) = sriov.profiles.get(profile_idx) {
+                sriov.editing_name = name.clone();
+                sriov.editing_profile = Some(profile.clone());
+                sriov.active_tab = EditorTab::Pf;
+                sriov.reset_editor_cursors();
+                sriov.sync_vf_count_buf();
+                sriov.scan_pfs();
+                return SriovUiAction::NavigateTo(SriovScreen::Editor(profile_idx));
             }
         }
         KeyCode::Char('R') | KeyCode::Char('r') => {
-            fetch_profile_status(state, profile_idx).await;
+            fetch_profile_status(sriov, profile_idx).await;
         }
         KeyCode::Char('a') => {
-            if let Some((name, _)) = state.sriov_state.profiles.get(profile_idx) {
+            if let Some((name, _)) = sriov.profiles.get(profile_idx) {
                 let profile_name = name.clone();
-                if crate::client::IpcClient::is_daemon_running() {
-                    match crate::client::IpcClient::send(&Request::Apply {
+                if perigee_core::client::IpcClient::is_daemon_running() {
+                    match perigee_core::client::IpcClient::send(&Request::Apply {
                         profile: profile_name.clone(),
                     })
                     .await
                     {
                         Ok(Response::Ok) => {
-                            state.sriov_state.message =
+                            sriov.message =
                                 Some(format!("Apply triggered for '{}'", profile_name));
-                            fetch_profile_status(state, profile_idx).await;
+                            fetch_profile_status(sriov, profile_idx).await;
                         }
                         Ok(Response::Error { message }) => {
-                            state.sriov_state.message = Some(format!("Apply error: {}", message));
+                            sriov.message = Some(format!("Apply error: {}", message));
                         }
                         _ => {
-                            state.sriov_state.message =
+                            sriov.message =
                                 Some("Unexpected daemon response".to_string());
                         }
                     }
                 } else {
-                    state.sriov_state.message = Some("Daemon is not running".to_string());
+                    sriov.message = Some("Daemon is not running".to_string());
                 }
             }
         }
         _ => {}
     }
+    SriovUiAction::None
 }
 
-async fn fetch_profile_status(state: &mut AppState, profile_idx: usize) {
-    if let Some((name, _)) = state.sriov_state.profiles.get(profile_idx) {
+async fn fetch_profile_status(sriov: &mut SriovState, profile_idx: usize) {
+    if let Some((name, _)) = sriov.profiles.get(profile_idx) {
         let profile_name = name.clone();
-        if crate::client::IpcClient::is_daemon_running() {
-            match crate::client::IpcClient::send(&Request::ProfileStatus {
+        if perigee_core::client::IpcClient::is_daemon_running() {
+            match perigee_core::client::IpcClient::send(&Request::ProfileStatus {
                 profile: profile_name,
             })
             .await
             {
                 Ok(Response::ProfileDetail(detail)) => {
-                    state.sriov_state.status_detail = Some(detail);
-                    state.sriov_state.status_error = None;
+                    sriov.status_detail = Some(detail);
+                    sriov.status_error = None;
                 }
                 Ok(Response::Error { message }) => {
-                    state.sriov_state.status_detail = None;
-                    state.sriov_state.status_error = Some(message);
+                    sriov.status_detail = None;
+                    sriov.status_error = Some(message);
                 }
                 Err(e) => {
-                    state.sriov_state.status_detail = None;
-                    state.sriov_state.status_error = Some(format!("IPC error: {}", e));
+                    sriov.status_detail = None;
+                    sriov.status_error = Some(format!("IPC error: {}", e));
                 }
                 _ => {
-                    state.sriov_state.status_detail = None;
-                    state.sriov_state.status_error = Some("Unexpected response".to_string());
+                    sriov.status_detail = None;
+                    sriov.status_error = Some("Unexpected response".to_string());
                 }
             }
         } else {
-            state.sriov_state.status_error = Some("Daemon is not running".to_string());
+            sriov.status_error = Some("Daemon is not running".to_string());
         }
     }
 }
 
 // ── Tab editor ──
 
-pub fn render_editor(frame: &mut Frame, state: &AppState, profile_idx: usize) {
+pub fn render_editor(frame: &mut Frame, daemon_online: bool, sriov: &SriovState, profile_idx: usize) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -724,19 +726,18 @@ pub fn render_editor(frame: &mut Frame, state: &AppState, profile_idx: usize) {
 
     let title = if profile_idx == usize::MAX {
         "SR-IOV > New Profile".to_string()
-    } else if let Some((name, _)) = state.sriov_state.profiles.get(profile_idx) {
+    } else if let Some((name, _)) = sriov.profiles.get(profile_idx) {
         format!("SR-IOV > {}", name)
     } else {
         "SR-IOV > Editor".to_string()
     };
 
-    common::header_bar(frame, chunks[0], &title, state.daemon_online);
+    common::header_bar(frame, chunks[0], &title, daemon_online);
 
-    // Tab bar
     let tab_titles: Vec<Line> = EditorTab::ALL
         .iter()
         .map(|t| {
-            let style = if *t == state.sriov_state.active_tab {
+            let style = if *t == sriov.active_tab {
                 Style::default()
                     .fg(common::BRAND)
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
@@ -748,22 +749,20 @@ pub fn render_editor(frame: &mut Frame, state: &AppState, profile_idx: usize) {
         .collect();
 
     let tabs = Tabs::new(tab_titles)
-        .select(state.sriov_state.active_tab.index())
+        .select(sriov.active_tab.index())
         .divider(Span::styled(" │ ", Style::default().fg(common::BORDER)));
     frame.render_widget(tabs, chunks[1]);
 
-    // Tab content
-    match state.sriov_state.active_tab {
-        EditorTab::Pf => pf_select::render(frame, state, chunks[2]),
-        EditorTab::General => vf_config::render_general(frame, state, chunks[2]),
-        EditorTab::VfTable => vf_config::render_vf_table(frame, state, chunks[2]),
-        EditorTab::Fdb => fdb_config::render(frame, state, chunks[2]),
-        EditorTab::Review => review::render(frame, state, chunks[2]),
+    match sriov.active_tab {
+        EditorTab::Pf => pf_select::render(frame, sriov, chunks[2]),
+        EditorTab::General => vf_config::render_general(frame, sriov, chunks[2]),
+        EditorTab::VfTable => vf_config::render_vf_table(frame, sriov, chunks[2]),
+        EditorTab::Fdb => fdb_config::render(frame, sriov, chunks[2]),
+        EditorTab::Review => review::render(frame, sriov, chunks[2]),
     }
 
-    // Show message if present (on non-Review tabs, since Review shows it inline)
-    if state.sriov_state.active_tab != EditorTab::Review {
-        if let Some(msg) = &state.sriov_state.message {
+    if sriov.active_tab != EditorTab::Review {
+        if let Some(msg) = &sriov.message {
             let msg_area = ratatui::layout::Rect {
                 x: chunks[2].x,
                 y: chunks[2].y + chunks[2].height.saturating_sub(1),
@@ -778,9 +777,9 @@ pub fn render_editor(frame: &mut Frame, state: &AppState, profile_idx: usize) {
         }
     }
 
-    let hints: Vec<(&str, &str)> = if state.sriov_state.edit_focus.is_some() {
+    let hints: Vec<(&str, &str)> = if sriov.edit_focus.is_some() {
         vec![("Enter", "Confirm"), ("Esc", "Cancel")]
-    } else if state.sriov_state.active_tab == EditorTab::Review {
+    } else if sriov.active_tab == EditorTab::Review {
         vec![
             ("Tab/◀▶", "Switch Tab"),
             ("Ctrl+S", "Save Only"),
@@ -800,84 +799,78 @@ pub fn render_editor(frame: &mut Frame, state: &AppState, profile_idx: usize) {
 }
 
 pub async fn handle_editor_input(
-    state: &mut AppState,
+    sriov: &mut SriovState,
     key: KeyEvent,
     _profile_idx: Option<usize>,
-) {
-    // When a field has text-editing focus, route everything to the tab handler
-    // except Ctrl+S which is always the save shortcut.
-    if state.sriov_state.edit_focus.is_some() {
+) -> SriovUiAction {
+    if sriov.edit_focus.is_some() {
         if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            do_save(state).await;
-            return;
+            do_save(sriov).await;
+            return SriovUiAction::None;
         }
-        // Esc exits focus mode, handled by tab
-        match state.sriov_state.active_tab {
-            EditorTab::Pf => pf_select::handle_input(state, key),
-            EditorTab::General => vf_config::handle_general_input(state, key),
-            EditorTab::VfTable => vf_config::handle_vf_table_input(state, key),
-            EditorTab::Fdb => fdb_config::handle_input(state, key),
-            EditorTab::Review => review::handle_input(state, key).await,
+        match sriov.active_tab {
+            EditorTab::Pf => pf_select::handle_input(sriov, key),
+            EditorTab::General => vf_config::handle_general_input(sriov, key),
+            EditorTab::VfTable => vf_config::handle_vf_table_input(sriov, key),
+            EditorTab::Fdb => fdb_config::handle_input(sriov, key),
+            EditorTab::Review => review::handle_input(sriov, key),
         }
-        return;
+        return SriovUiAction::None;
     }
 
-    // Global editor keys (only active when no field focus)
     match key.code {
         KeyCode::Esc => {
-            state.screen = AppScreen::SriovProfiles;
-            return;
+            return SriovUiAction::NavigateTo(SriovScreen::Profiles);
         }
         KeyCode::Char('q') if key.modifiers.is_empty() => {
-            state.screen = AppScreen::SriovProfiles;
-            return;
+            return SriovUiAction::NavigateTo(SriovScreen::Profiles);
         }
         KeyCode::Tab | KeyCode::Right => {
-            let next = (state.sriov_state.active_tab.index() + 1) % EditorTab::ALL.len();
-            state.sriov_state.active_tab = EditorTab::from_index(next);
-            return;
+            let next = (sriov.active_tab.index() + 1) % EditorTab::ALL.len();
+            sriov.active_tab = EditorTab::from_index(next);
+            return SriovUiAction::None;
         }
         KeyCode::BackTab | KeyCode::Left => {
-            let cur = state.sriov_state.active_tab.index();
+            let cur = sriov.active_tab.index();
             let prev = if cur == 0 {
                 EditorTab::ALL.len() - 1
             } else {
                 cur - 1
             };
-            state.sriov_state.active_tab = EditorTab::from_index(prev);
-            return;
+            sriov.active_tab = EditorTab::from_index(prev);
+            return SriovUiAction::None;
         }
         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            do_save(state).await;
-            return;
+            do_save(sriov).await;
+            return SriovUiAction::None;
         }
-        KeyCode::Enter if state.sriov_state.active_tab == EditorTab::Review => {
-            do_save_and_apply(state).await;
-            return;
+        KeyCode::Enter if sriov.active_tab == EditorTab::Review => {
+            do_save_and_apply(sriov).await;
+            return SriovUiAction::None;
         }
         _ => {}
     }
 
-    // Per-tab input handling (navigation mode)
-    match state.sriov_state.active_tab {
-        EditorTab::Pf => pf_select::handle_input(state, key),
-        EditorTab::General => vf_config::handle_general_input(state, key),
-        EditorTab::VfTable => vf_config::handle_vf_table_input(state, key),
-        EditorTab::Fdb => fdb_config::handle_input(state, key),
-        EditorTab::Review => review::handle_input(state, key).await,
+    match sriov.active_tab {
+        EditorTab::Pf => pf_select::handle_input(sriov, key),
+        EditorTab::General => vf_config::handle_general_input(sriov, key),
+        EditorTab::VfTable => vf_config::handle_vf_table_input(sriov, key),
+        EditorTab::Fdb => fdb_config::handle_input(sriov, key),
+        EditorTab::Review => review::handle_input(sriov, key),
     }
+    SriovUiAction::None
 }
 
-async fn do_save(state: &mut AppState) {
-    state.sriov_state.edit_focus = None;
-    match state.sriov_state.save_config() {
+async fn do_save(sriov: &mut SriovState) {
+    sriov.edit_focus = None;
+    match sriov.save_config() {
         Ok(()) => {
             let mut msg = format!(
                 "✓ Config saved to {}",
-                perigee_daemon::config::sriov_config_path().display()
+                sriov_config_path().display()
             );
-            if crate::client::IpcClient::is_daemon_running() {
-                match crate::client::IpcClient::send(&Request::Reload).await {
+            if perigee_core::client::IpcClient::is_daemon_running() {
+                match perigee_core::client::IpcClient::send(&Request::Reload).await {
                     Ok(Response::Ok) => {
                         msg.push_str(" — daemon config reloaded (not yet applied).");
                     }
@@ -887,24 +880,24 @@ async fn do_save(state: &mut AppState) {
                     _ => {}
                 }
             }
-            state.sriov_state.message = Some(msg);
-            state.sriov_state.active_tab = EditorTab::Review;
+            sriov.message = Some(msg);
+            sriov.active_tab = EditorTab::Review;
         }
         Err(e) => {
-            state.sriov_state.message = Some(format!("✗ Save failed: {}", e));
-            state.sriov_state.active_tab = EditorTab::Review;
+            sriov.message = Some(format!("✗ Save failed: {}", e));
+            sriov.active_tab = EditorTab::Review;
         }
     }
 }
 
-async fn do_save_and_apply(state: &mut AppState) {
-    state.sriov_state.edit_focus = None;
-    let profile_name = state.sriov_state.editing_name.trim().to_string();
-    match state.sriov_state.save_config() {
+async fn do_save_and_apply(sriov: &mut SriovState) {
+    sriov.edit_focus = None;
+    let profile_name = sriov.editing_name.trim().to_string();
+    match sriov.save_config() {
         Ok(()) => {
             let mut msg = "✓ Config saved".to_string();
-            if crate::client::IpcClient::is_daemon_running() {
-                match crate::client::IpcClient::send(&Request::Reload).await {
+            if perigee_core::client::IpcClient::is_daemon_running() {
+                match perigee_core::client::IpcClient::send(&Request::Reload).await {
                     Ok(Response::Ok) => {}
                     Ok(Response::Error { message }) => {
                         msg.push_str(&format!(", reload error: {}", message));
@@ -912,7 +905,7 @@ async fn do_save_and_apply(state: &mut AppState) {
                     _ => {}
                 }
                 if !profile_name.is_empty() {
-                    match crate::client::IpcClient::send(&Request::Apply {
+                    match perigee_core::client::IpcClient::send(&Request::Apply {
                         profile: profile_name,
                     })
                     .await
@@ -929,12 +922,12 @@ async fn do_save_and_apply(state: &mut AppState) {
                     }
                 }
             }
-            state.sriov_state.message = Some(msg);
-            state.sriov_state.active_tab = EditorTab::Review;
+            sriov.message = Some(msg);
+            sriov.active_tab = EditorTab::Review;
         }
         Err(e) => {
-            state.sriov_state.message = Some(format!("✗ Save failed: {}", e));
-            state.sriov_state.active_tab = EditorTab::Review;
+            sriov.message = Some(format!("✗ Save failed: {}", e));
+            sriov.active_tab = EditorTab::Review;
         }
     }
 }

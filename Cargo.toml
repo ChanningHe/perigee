@@ -1,9 +1,10 @@
 [workspace]
 members = [
-    "crates/perigee-bin",
+    "crates/perigee-cli",
     "crates/perigee-core",
     "crates/perigee-daemon",
-    "crates/perigee-sriov",
+    "crates/modules/perigee-sriov",
+    "crates/perigee-tui",
 ]
 resolver = "2"
 

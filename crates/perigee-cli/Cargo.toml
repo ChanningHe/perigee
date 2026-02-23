@@ -12,7 +12,8 @@ path = "src/main.rs"
 [dependencies]
 perigee-core = { path = "../perigee-core" }
 perigee-daemon = { path = "../perigee-daemon" }
-perigee-sriov = { path = "../perigee-sriov" }
+perigee-sriov = { path = "../modules/perigee-sriov" }
+perigee-tui = { path = "../perigee-tui" }
 tokio.workspace = true
 clap.workspace = true
 ratatui.workspace = true

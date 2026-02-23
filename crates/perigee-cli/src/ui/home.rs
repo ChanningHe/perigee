@@ -9,11 +9,12 @@ use ratatui::{
 
 use super::{common, AppScreen, AppState};
 
-const MENU_ITEMS: &[(&str, &str)] = &[
-    ("SR-IOV", "Configure SR-IOV virtual functions"),
-    // ("GPU Passthrough", "Configure GPU passthrough"),
-    // ("ZFS Tuning", "Optimize ZFS parameters"),
-];
+fn menu_items() -> Vec<(&'static str, &'static str)> {
+    vec![
+        perigee_sriov::module_info(),
+        // perigee_gpu::module_info(),  // future
+    ]
+}
 
 const LOGO: &[&str] = &[
     r"  ██████  ███████ ██████  ██  ██████  ███████ ███████ ",
@@ -131,14 +132,15 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     frame.render_widget(info_block, info_area);
 
     // ── Module list ── (same width as system info)
-    let list_height = (MENU_ITEMS.len() as u16 * 2 + 2).min(chunks[7].height);
+    let modules = menu_items();
+    let list_height = (modules.len() as u16 * 2 + 2).min(chunks[7].height);
     let list_area = centered_h(box_w, chunks[7]);
     let list_area = Rect {
         height: list_height,
         ..list_area
     };
 
-    let items: Vec<ListItem> = MENU_ITEMS
+    let items: Vec<ListItem> = modules
         .iter()
         .enumerate()
         .map(|(i, (name, desc))| {

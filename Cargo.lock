@@ -702,6 +702,7 @@ dependencies = [
  "perigee-core",
  "perigee-daemon",
  "perigee-sriov",
+ "perigee-tui",
  "ratatui",
  "serde",
  "serde_json",
@@ -721,6 +722,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -731,7 +733,6 @@ dependencies = [
  "async-trait",
  "chrono",
  "perigee-core",
- "perigee-sriov",
  "serde",
  "serde_json",
  "thiserror",
@@ -748,15 +749,28 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "crossterm",
  "notify",
  "perigee-core",
+ "perigee-daemon",
+ "perigee-tui",
  "rand",
+ "ratatui",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "perigee-tui"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "perigee-core",
+ "ratatui",
 ]
 
 [[package]]
