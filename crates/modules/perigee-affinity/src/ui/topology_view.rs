@@ -88,22 +88,7 @@ pub fn render(frame: &mut Frame, daemon_online: bool, state: &mut AffinityState)
         lines.push(Line::from(""));
 
         let bindings = state.existing_bindings();
-        let mut ccd_thread_count: Vec<usize> = vec![0; topo.core_groups.len()];
-        let mut ccd_vm_count: Vec<usize> = vec![0; topo.core_groups.len()];
-        for binding in &bindings {
-            let mut touched = std::collections::HashSet::new();
-            for &cpu in &binding.cpus {
-                for (idx, cg) in topo.core_groups.iter().enumerate() {
-                    if cg.all_cpus.contains(&cpu) {
-                        ccd_thread_count[idx] += 1;
-                        touched.insert(idx);
-                    }
-                }
-            }
-            for idx in touched {
-                ccd_vm_count[idx] += 1;
-            }
-        }
+        let ccd_stats = compute_ccd_stats(&bindings, &topo.core_groups);
 
         let bar_width = 8usize;
 
@@ -113,37 +98,15 @@ pub fn render(frame: &mut Frame, daemon_online: bool, state: &mut AffinityState)
                 for (idx, cg) in topo.core_groups.iter().enumerate() {
                     let cores = cg.physical_cpus.len();
                     let threads = cg.all_cpus.len();
-                    let used = ccd_thread_count[idx].min(threads);
-                    let filled = if threads > 0 {
-                        (used * bar_width) / threads
-                    } else {
-                        0
-                    };
-                    let empty = bar_width - filled;
-                    let bar_color = load_bar_color(used, threads);
-
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("  {:<10}", cg.name),
-                            common::style_selected(),
-                        ),
-                        Span::styled(
-                            format!("{}C/{}T  ", cores, threads),
-                            common::style_value(),
-                        ),
-                        Span::styled(
-                            "█".repeat(filled),
-                            Style::default().fg(bar_color),
-                        ),
-                        Span::styled(
-                            "░".repeat(empty),
-                            Style::default().fg(common::TEXT_MUTED),
-                        ),
-                        Span::styled(
-                            format!("  {}", load_label(ccd_vm_count[idx], used, threads)),
-                            Style::default().fg(common::TEXT_DIM),
-                        ),
-                    ]));
+                    let st = &ccd_stats[idx];
+                    lines.push(build_ccd_line(
+                        &format!("  {:<10}", cg.name),
+                        None,
+                        cores,
+                        threads,
+                        st,
+                        bar_width,
+                    ));
                 }
             }
             _ => {
@@ -157,50 +120,20 @@ pub fn render(frame: &mut Frame, daemon_online: bool, state: &mut AffinityState)
                             .unwrap_or(0);
                         let cores = cg.physical_cpus.len();
                         let threads = cg.all_cpus.len();
-                        let used = ccd_thread_count[global_idx].min(threads);
-                        let filled = if threads > 0 {
-                            (used * bar_width) / threads
+                        let l3 = if cg.l3_cache_id >= 0 {
+                            Some(format!("L3#{:<3}", cg.l3_cache_id))
                         } else {
-                            0
+                            None
                         };
-                        let empty = bar_width - filled;
-                        let bar_color = load_bar_color(used, threads);
-
-                        let l3_label = if cg.l3_cache_id >= 0 {
-                            format!("L3#{:<3}", cg.l3_cache_id)
-                        } else {
-                            "     ".to_string()
-                        };
-
-                        lines.push(Line::from(vec![
-                            Span::styled(
-                                format!("  {:<7}", cg.name),
-                                common::style_selected(),
-                            ),
-                            Span::styled(
-                                format!("{} ", l3_label),
-                                Style::default().fg(common::TEXT_MUTED),
-                            ),
-                            Span::styled(
-                                format!("{}C/{}T  ", cores, threads),
-                                common::style_value(),
-                            ),
-                            Span::styled(
-                                "█".repeat(filled),
-                                Style::default().fg(bar_color),
-                            ),
-                            Span::styled(
-                                "░".repeat(empty),
-                                Style::default().fg(common::TEXT_MUTED),
-                            ),
-                            Span::styled(
-                                format!(
-                                    "  {}",
-                                    load_label(ccd_vm_count[global_idx], used, threads)
-                                ),
-                                Style::default().fg(common::TEXT_DIM),
-                            ),
-                        ]));
+                        let st = &ccd_stats[global_idx];
+                        lines.push(build_ccd_line(
+                            &format!("  {:<7}", cg.name),
+                            l3.as_deref(),
+                            cores,
+                            threads,
+                            st,
+                            bar_width,
+                        ));
                     }
                     lines.push(Line::from(""));
                 }
@@ -319,23 +252,99 @@ pub fn render(frame: &mut Frame, daemon_online: bool, state: &mut AffinityState)
     );
 }
 
-fn load_bar_color(used: usize, total: usize) -> ratatui::style::Color {
-    if used == 0 {
+struct CcdStats {
+    unique_threads: usize,
+    total_assigned: usize,
+}
+
+fn compute_ccd_stats(
+    bindings: &[crate::affinity::VmBinding],
+    core_groups: &[crate::topology::CoreGroup],
+) -> Vec<CcdStats> {
+    let mut unique_sets: Vec<std::collections::HashSet<usize>> =
+        vec![std::collections::HashSet::new(); core_groups.len()];
+    let mut total_assigned: Vec<usize> = vec![0; core_groups.len()];
+
+    for binding in bindings {
+        for &cpu in &binding.cpus {
+            for (idx, cg) in core_groups.iter().enumerate() {
+                if cg.all_cpus.contains(&cpu) {
+                    unique_sets[idx].insert(cpu);
+                    total_assigned[idx] += 1;
+                }
+            }
+        }
+    }
+
+    unique_sets
+        .into_iter()
+        .zip(total_assigned)
+        .map(|(uniq, total)| CcdStats {
+            unique_threads: uniq.len(),
+            total_assigned: total,
+        })
+        .collect()
+}
+
+fn build_ccd_line<'a>(
+    name_label: &str,
+    l3_label: Option<&str>,
+    cores: usize,
+    threads: usize,
+    stats: &CcdStats,
+    bar_width: usize,
+) -> Line<'a> {
+    let unique = stats.unique_threads;
+    let filled = if threads > 0 {
+        (unique * bar_width) / threads
+    } else {
+        0
+    };
+    let empty = bar_width - filled;
+
+    let bar_color = if unique == 0 {
         common::SUCCESS
-    } else if used >= total {
+    } else if unique >= threads {
         common::ERROR
     } else {
         common::BRAND
-    }
-}
+    };
 
-fn load_label(vm_count: usize, used: usize, total: usize) -> String {
-    if used == 0 {
+    let label = if unique == 0 {
         "idle".to_string()
     } else {
-        let vm_word = if vm_count == 1 { "VM" } else { "VMs" };
-        format!("{} {}, {}/{}", vm_count, vm_word, used, total)
+        let oversub = if stats.total_assigned > unique {
+            let ratio = stats.total_assigned as f64 / unique as f64;
+            format!("  {:.1}x ⚠", ratio)
+        } else {
+            String::new()
+        };
+        format!("{}/{} used{}", unique, threads, oversub)
+    };
+
+    let mut spans = vec![Span::styled(
+        name_label.to_string(),
+        common::style_selected(),
+    )];
+
+    if let Some(l3) = l3_label {
+        spans.push(Span::styled(
+            format!("{} ", l3),
+            Style::default().fg(common::TEXT_MUTED),
+        ));
     }
+
+    spans.extend([
+        Span::styled(
+            format!("{}C/{}T  ", cores, threads),
+            common::style_value(),
+        ),
+        Span::styled("█".repeat(filled), Style::default().fg(bar_color)),
+        Span::styled("░".repeat(empty), Style::default().fg(common::TEXT_MUTED)),
+        Span::styled(format!("  {}", label), Style::default().fg(common::TEXT_DIM)),
+    ]);
+
+    Line::from(spans)
 }
 
 fn extract_ccd_id(name: &str) -> String {
