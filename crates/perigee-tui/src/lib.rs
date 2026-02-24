@@ -102,22 +102,20 @@ pub fn header_bar(frame: &mut Frame, area: Rect, title: &str, daemon_online: boo
 // ── Footer ──
 
 pub fn footer_bar(frame: &mut Frame, area: Rect, hints: &[(&str, &str)]) {
-    let spans: Vec<Span> = hints
-        .iter()
-        .flat_map(|(key, desc)| {
-            vec![
-                Span::styled(
-                    format!(" {} ", key),
-                    Style::default()
-                        .fg(KEY_FG)
-                        .bg(KEY_BG)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!(" {} ", desc), Style::default().fg(TEXT_DIM)),
-                Span::raw("  "),
-            ]
-        })
-        .collect();
+    let mut spans: Vec<Span> = vec![Span::raw("  ")];
+    spans.extend(hints.iter().flat_map(|(key, desc)| {
+        vec![
+            Span::styled(
+                format!(" {} ", key),
+                Style::default()
+                    .fg(KEY_FG)
+                    .bg(KEY_BG)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!(" {} ", desc), Style::default().fg(TEXT_DIM)),
+            Span::raw("  "),
+        ]
+    }));
 
     let footer = Paragraph::new(Line::from(spans)).block(
         Block::default()

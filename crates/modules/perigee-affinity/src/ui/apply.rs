@@ -96,10 +96,16 @@ pub fn render_apply(frame: &mut Frame, daemon_online: bool, state: &AffinityStat
                 Style::default().fg(common::TEXT_DIM)
             };
 
+            let name_display = if vm.name.len() > 14 {
+                format!("{:.14}…", vm.name)
+            } else {
+                vm.name.clone()
+            };
+
             ListItem::new(Line::from(vec![
                 Span::styled(prefix, style),
                 Span::styled(format!("{:<6}", vm.vmid), style),
-                Span::styled(format!("{:<16}", vm.name), style),
+                Span::styled(format!("{:<16}", name_display), style),
                 Span::styled(
                     format!("{:<10}", vm.status),
                     if selected {
@@ -325,9 +331,15 @@ pub fn render_auto_apply(frame: &mut Frame, daemon_online: bool, state: &Affinit
                 opt.ccds_used.join(", ")
             };
 
+            let name_display = if name.len() > 14 {
+                format!("{:.14}…", name)
+            } else {
+                name.clone()
+            };
+
             lines.push(Line::from(vec![
                 Span::styled(format!("  {:<6}", vmid), common::style_value()),
-                Span::styled(format!("{:<16}", name), common::style_value()),
+                Span::styled(format!("{:<16}", name_display), common::style_value()),
                 Span::styled(
                     format!("{:>5}  ", opt.cpus.len()),
                     common::style_value(),

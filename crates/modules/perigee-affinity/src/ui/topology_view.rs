@@ -144,8 +144,8 @@ pub fn render(frame: &mut Frame, daemon_online: bool, state: &mut AffinityState)
             lines.push(section("── VM Bindings ──"));
             lines.push(Line::from(Span::styled(
                 format!(
-                    "  {:<8} {:<16} {:>5}  {:<18} {}",
-                    "VMID", "Name", "Cores", "Affinity", "CCD"
+                    "    {:<6} {:<12} {:>3}  {:<26} {}",
+                    "VMID", "Name", "vC", "Affinity", "CCD"
                 ),
                 common::style_muted(),
             )));
@@ -174,14 +174,14 @@ pub fn render(frame: &mut Frame, daemon_online: bool, state: &mut AffinityState)
                     Span::styled("● ", Style::default().fg(common::TEXT_MUTED))
                 };
 
-                let name_display = if vm.name.len() > 14 {
-                    format!("{:.14}…", vm.name)
+                let name_display = if vm.name.len() > 10 {
+                    format!("{:.10}…", vm.name)
                 } else {
                     vm.name.clone()
                 };
 
-                let aff_display = if aff_str.len() > 16 {
-                    format!("{:.16}…", aff_str)
+                let aff_display = if aff_str.len() > 24 {
+                    format!("{:.24}…", aff_str)
                 } else {
                     aff_str
                 };
@@ -191,15 +191,15 @@ pub fn render(frame: &mut Frame, daemon_online: bool, state: &mut AffinityState)
                     status_dot,
                     Span::styled(format!("{:<6}", vm.vmid), common::style_value()),
                     Span::styled(
-                        format!("{:<16}", name_display),
+                        format!("{:<12}", name_display),
                         Style::default().fg(common::TEXT_DIM),
                     ),
                     Span::styled(
-                        format!("{:>5}  ", cores),
+                        format!("{:>3}  ", cores),
                         Style::default().fg(common::TEXT_DIM),
                     ),
                     Span::styled(
-                        format!("{:<18} ", aff_display),
+                        format!("{:<26} ", aff_display),
                         Style::default().fg(common::TEXT_DIM),
                     ),
                     Span::styled(ccd_str, Style::default().fg(common::BRAND_DIM)),
