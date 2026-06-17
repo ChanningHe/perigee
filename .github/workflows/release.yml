@@ -8,8 +8,25 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  verify-version:
+    name: Verify tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag vs Cargo.toml version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CARGO_VER=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "tag=${TAG} cargo=${CARGO_VER}"
+          if [ "${TAG}" != "${CARGO_VER}" ]; then
+            echo "::error::Tag v${TAG} does not match Cargo.toml version ${CARGO_VER}. Use 'just release ${TAG}' to bump and tag together."
+            exit 1
+          fi
+
   build-x86_64:
     name: Build x86_64
+    needs: [verify-version]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,6 +63,7 @@ jobs:
 
   build-aarch64:
     name: Build aarch64
+    needs: [verify-version]
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4

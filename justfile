@@ -116,3 +116,39 @@ info:
     @echo "Perigee v{{version}}"
     @rustc --version
     @cargo --version
+
+# ── Release ──
+
+# Bump version, commit, and tag: just release 0.2.0
+# Cargo.toml stays the single source of truth; the tag is derived from it.
+release new_version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    NEW="{{new_version}}"
+    if ! printf '%s' "$NEW" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+        echo "error: version must be X.Y.Z (got '$NEW')" >&2
+        exit 1
+    fi
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "error: working tree is dirty; commit or stash first" >&2
+        exit 1
+    fi
+    TAG="v${NEW}"
+    if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+        echo "error: tag ${TAG} already exists" >&2
+        exit 1
+    fi
+    CUR=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+    echo "Bumping ${CUR} → ${NEW}"
+    # Only [workspace.package] starts a line with `version = `; crate members use
+    # `version.workspace = true`, so this single substitution is unambiguous.
+    sed -i.bak 's/^version = ".*"/version = "'"${NEW}"'"/' Cargo.toml
+    rm -f Cargo.toml.bak
+    # Sync the workspace crate versions in the lockfile (no network needed).
+    cargo update --workspace --offline
+    git add Cargo.toml Cargo.lock
+    git commit -m "chore(release): ${TAG}"
+    git tag -a "${TAG}" -m "Release ${TAG}"
+    echo ""
+    echo "Tagged ${TAG} on $(git rev-parse --short HEAD). Push to trigger the release:"
+    echo "  git push origin HEAD ${TAG}"
