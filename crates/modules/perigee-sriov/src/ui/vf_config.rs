@@ -237,10 +237,20 @@ pub fn render_vf_table(frame: &mut Frame, sriov: &SriovState, area: Rect) {
             let spoof_val = vf_override
                 .and_then(|o| o.spoofchk)
                 .unwrap_or(profile.defaults.spoofchk);
-            let mac_str = vf_override
-                .and_then(|o| o.mac.as_ref())
-                .map(|m| m.to_string())
-                .unwrap_or_else(|| "(auto)".to_string());
+            // Preview the MAC each VF will get from the selected strategy so the
+            // operator sees it before applying. Sequential is deterministic
+            // (PF MAC + index); Random is assigned at apply time; Custom is not
+            // configurable here yet.
+            let mac_str = match vf_override.and_then(|o| o.mac.as_ref()) {
+                Some(m) => m.to_string(),
+                None => match profile.mac_strategy {
+                    MacStrategyConfig::Sequential => {
+                        profile.mac.increment(i as u64 + 1).to_string()
+                    }
+                    MacStrategyConfig::Random => "(random)".to_string(),
+                    MacStrategyConfig::Custom => "(auto)".to_string(),
+                },
+            };
             let is_editing_vlan = is_selected && sriov.edit_focus == Some(EditFocus::VfVlanId);
             let vlan_str = if is_editing_vlan {
                 format!("[{}▎]", &sriov.vlan_id_buf)
