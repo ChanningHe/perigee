@@ -38,6 +38,13 @@ pub enum Commands {
     /// Uninstall perigee systemd service
     Uninstall,
 
+    /// Update to the latest release binary from GitHub
+    Update {
+        /// Reinstall even if already on the latest version
+        #[arg(long, short)]
+        force: bool,
+    },
+
     /// CPU affinity / core pinning (TUI or CLI)
     Affinity {
         #[command(subcommand)]

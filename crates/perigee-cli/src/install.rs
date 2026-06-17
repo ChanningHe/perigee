@@ -6,6 +6,7 @@ use std::process::Command;
 const SERVICE_NAME: &str = "perigee.service";
 const SERVICE_PATH: &str = "/etc/systemd/system/perigee.service";
 const BINARY_INSTALL_PATH: &str = "/usr/local/bin/perigee";
+const REPO: &str = "channinghe/perigee";
 
 const SERVICE_CONTENT: &str = r#"[Unit]
 Description=Perigee - Proxmox VE Helper Daemon
@@ -143,6 +144,134 @@ pub fn uninstall() -> Result<()> {
     Ok(())
 }
 
+/// Download the latest release binary from GitHub and swap it into place.
+/// Trusts the GitHub release for `REPO` over HTTPS (same trust model as any
+/// self-updater); curl is used since it is always present on PVE.
+pub fn update(force: bool) -> Result<()> {
+    check_root()?;
+
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x86_64",
+        "aarch64" => "aarch64",
+        other => bail!("unsupported architecture for self-update: {}", other),
+    };
+    let current = env!("CARGO_PKG_VERSION");
+    println!("Current version: {}", current);
+
+    // Resolve the latest release tag via the GitHub API.
+    let api = format!("https://api.github.com/repos/{}/releases/latest", REPO);
+    let json = curl_capture(&[
+        "-fsSL",
+        "-A",
+        "perigee-updater",
+        "-H",
+        "Accept: application/vnd.github+json",
+        api.as_str(),
+    ])
+    .context("failed to query GitHub releases (is curl installed and the network up?)")?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&json).context("unexpected GitHub API response")?;
+    let tag = parsed["tag_name"]
+        .as_str()
+        .context("no tag_name in GitHub API response")?;
+    let latest = tag.strip_prefix('v').unwrap_or(tag);
+    println!("Latest release:  {}", latest);
+
+    if !force && !is_newer(current, latest) {
+        println!("Already up to date.");
+        return Ok(());
+    }
+
+    // Download next to the install path so the final move is an atomic rename.
+    let asset = format!("perigee-{}-linux-{}-musl", latest, arch);
+    let url = format!(
+        "https://github.com/{}/releases/download/{}/{}",
+        REPO, tag, asset
+    );
+    let dst = Path::new(BINARY_INSTALL_PATH);
+    let tmp = dst.with_extension("update");
+    println!("Downloading {} ...", asset);
+    curl_download(&url, &tmp).with_context(|| format!("failed to download {}", url))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+    }
+
+    // Sanity-check the download before swapping it in.
+    let runs = Command::new(&tmp)
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !runs {
+        let _ = std::fs::remove_file(&tmp);
+        bail!("downloaded binary failed to run; aborting update");
+    }
+
+    // Replace the binary, stopping the service if it holds the old inode.
+    let was_active = service_is_active();
+    if was_active {
+        let _ = run_systemctl(&["stop", SERVICE_NAME]);
+        println!("Stopped {} for upgrade.", SERVICE_NAME);
+    }
+    std::fs::rename(&tmp, dst)
+        .with_context(|| format!("failed to install binary to {}", dst.display()))?;
+    println!("Updated {} -> {}", current, latest);
+
+    if was_active {
+        run_systemctl(&["restart", SERVICE_NAME])?;
+        println!("Service {} restarted.", SERVICE_NAME);
+    }
+    Ok(())
+}
+
+/// True when `latest` is a strictly higher semver than `current`. Falls back to
+/// a plain inequality when either side is not parseable, so unusual tags still
+/// allow an update rather than silently refusing.
+fn is_newer(current: &str, latest: &str) -> bool {
+    match (parse_semver(current), parse_semver(latest)) {
+        (Some(c), Some(l)) => l > c,
+        _ => latest != current,
+    }
+}
+
+fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
+    let mut it = s.split('.');
+    let a = it.next()?.parse().ok()?;
+    let b = it.next()?.parse().ok()?;
+    let c = it.next()?.parse().ok()?;
+    Some((a, b, c))
+}
+
+fn curl_capture(args: &[&str]) -> Result<String> {
+    let out = Command::new("curl")
+        .args(args)
+        .output()
+        .context("failed to run curl")?;
+    if !out.status.success() {
+        bail!(
+            "curl failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    String::from_utf8(out.stdout).context("curl output was not UTF-8")
+}
+
+fn curl_download(url: &str, dst: &Path) -> Result<()> {
+    let status = Command::new("curl")
+        .args(["-fL", "--retry", "2", "-o"])
+        .arg(dst)
+        .arg(url)
+        .status()
+        .context("failed to run curl")?;
+    if !status.success() {
+        bail!("download failed (HTTP error or network issue)");
+    }
+    Ok(())
+}
+
 // ── helpers ──
 
 fn copy_binary(src: &Path) -> Result<()> {
@@ -216,4 +345,30 @@ fn run_systemctl(args: &[&str]) -> Result<()> {
         bail!("systemctl {} failed: {}", args.join(" "), stderr.trim());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn newer_versions_are_detected() {
+        assert!(is_newer("0.0.5", "0.0.6"));
+        assert!(is_newer("0.0.5", "0.1.0"));
+        assert!(is_newer("0.9.9", "1.0.0"));
+    }
+
+    #[test]
+    fn same_or_older_is_not_newer() {
+        assert!(!is_newer("0.1.0", "0.1.0"));
+        assert!(!is_newer("0.2.0", "0.1.9"));
+        assert!(!is_newer("1.0.0", "0.9.9"));
+    }
+
+    #[test]
+    fn unparseable_falls_back_to_inequality() {
+        // A non-semver tag still allows an update when it differs.
+        assert!(is_newer("0.1.0", "nightly"));
+        assert!(!is_newer("nightly", "nightly"));
+    }
 }

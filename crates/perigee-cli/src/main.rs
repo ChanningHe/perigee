@@ -30,6 +30,10 @@ async fn main() -> Result<()> {
             install::uninstall()?;
             Ok(())
         }
+        Some(Commands::Update { force }) => {
+            install::update(force)?;
+            Ok(())
+        }
         Some(Commands::Affinity { action }) => match action {
             None => ui::run_affinity_tui().await,
             Some(action) => handle_affinity_cli(action).await,
