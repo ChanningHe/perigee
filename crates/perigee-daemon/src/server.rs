@@ -158,7 +158,9 @@ async fn process_request(
         Request::Apply { profile } => {
             let mut reg = registry.lock().await;
             if let Some(module) = reg.get_mut("sriov") {
-                match module.retry_profile(&profile) {
+                // retry_profile performs blocking sysfs writes; run it via
+                // block_in_place so it does not stall the async reactor.
+                match tokio::task::block_in_place(|| module.retry_profile(&profile)) {
                     Ok(()) => Response::Ok,
                     Err(e) => Response::Error {
                         message: e.to_string(),
@@ -173,7 +175,8 @@ async fn process_request(
         Request::RetryFailed { profile } => {
             let mut reg = registry.lock().await;
             if let Some(module) = reg.get_mut("sriov") {
-                match module.retry_profile(&profile) {
+                // Blocking sysfs writes — keep them off the async reactor.
+                match tokio::task::block_in_place(|| module.retry_profile(&profile)) {
                     Ok(()) => Response::Ok,
                     Err(e) => Response::Error {
                         message: format!("retry failed for '{}': {}", profile, e),
