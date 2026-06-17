@@ -100,9 +100,11 @@ async fn main_loop(terminal: &mut DefaultTerminal, state: &mut AppState) -> Resu
         state.affinity_state.poll_preload();
         terminal.draw(|frame| match state.screen {
             AppScreen::Home => home::render(frame, state),
-            AppScreen::SriovProfiles => {
-                perigee_sriov::ui::render_profiles(frame, state.daemon_online, &state.sriov_state)
-            }
+            AppScreen::SriovProfiles => perigee_sriov::ui::render_profiles(
+                frame,
+                state.daemon_online,
+                &mut state.sriov_state,
+            ),
             AppScreen::SriovStatus(idx) => perigee_sriov::ui::render_status(
                 frame,
                 state.daemon_online,

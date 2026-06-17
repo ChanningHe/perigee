@@ -237,7 +237,7 @@ impl SriovState {
 
 // ── Profile list ──
 
-pub fn render_profiles(frame: &mut Frame, daemon_online: bool, sriov: &SriovState) {
+pub fn render_profiles(frame: &mut Frame, daemon_online: bool, sriov: &mut SriovState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -353,7 +353,10 @@ pub fn render_profiles(frame: &mut Frame, daemon_online: bool, sriov: &SriovStat
             .split(chunks[1]);
 
         frame.render_widget(Paragraph::new(header), inner_chunks[0]);
-        frame.render_widget(list, inner_chunks[1]);
+        // Stateful render so the selection scrolls into view once the profile
+        // count exceeds the visible rows; a plain render_widget ignores the
+        // ListState and the cursor would vanish off the bottom.
+        frame.render_stateful_widget(list, inner_chunks[1], &mut sriov.profile_list_state);
     }
 
     if let Some(msg) = &sriov.message {
