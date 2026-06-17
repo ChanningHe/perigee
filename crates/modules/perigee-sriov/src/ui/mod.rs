@@ -220,9 +220,11 @@ impl SriovState {
 
         let path = sriov_config_path();
         let mut file_config = if path.exists() {
-            SriovFileConfig::load(&path).unwrap_or(SriovFileConfig {
-                sriov: BTreeMap::new(),
-            })
+            // Never clobber an existing config we cannot parse — that would drop
+            // every other profile in the file. Abort and let the user fix it.
+            SriovFileConfig::load(&path).map_err(|e| {
+                format!("Refusing to overwrite unreadable {}: {}", path.display(), e)
+            })?
         } else {
             SriovFileConfig {
                 sriov: BTreeMap::new(),
