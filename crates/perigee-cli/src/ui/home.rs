@@ -274,12 +274,16 @@ fn centered_h(width: u16, area: Rect) -> Rect {
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    // Count and slice by chars, never bytes: a byte-index slice panics on a
+    // multi-byte UTF-8 boundary (e.g. a non-ASCII hostname or CPU model string),
+    // which would abort mid-render and leave the terminal in raw mode.
+    if s.chars().count() <= max {
         s.to_string()
     } else if max > 3 {
-        format!("{}...", &s[..max - 3])
+        let head: String = s.chars().take(max - 3).collect();
+        format!("{}...", head)
     } else {
-        s[..max].to_string()
+        s.chars().take(max).collect()
     }
 }
 
@@ -344,5 +348,32 @@ pub async fn handle_input(state: &mut AppState, key: KeyEvent) {
             state.daemon_online = perigee_core::client::IpcClient::is_daemon_running();
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_str;
+
+    #[test]
+    fn short_string_is_unchanged() {
+        assert_eq!(truncate_str("pve-node", 14), "pve-node");
+    }
+
+    #[test]
+    fn long_ascii_is_ellipsized() {
+        assert_eq!(truncate_str("supermicro-host-01", 10), "supermi...");
+    }
+
+    #[test]
+    fn multibyte_input_does_not_panic() {
+        // A non-ASCII hostname/CPU model must not panic on a byte-boundary slice.
+        let s = "节点-超长主机名称测试";
+        let out = truncate_str(s, 6);
+        assert_eq!(out.chars().count(), 6);
+        assert!(out.ends_with("..."));
+
+        // max <= 3 takes the head chars without an ellipsis.
+        assert_eq!(truncate_str("中文字符", 2), "中文");
     }
 }
