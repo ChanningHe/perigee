@@ -5,6 +5,9 @@ pub enum PerigeeError {
     #[error("sysfs error: {0}")]
     Sysfs(String),
 
+    #[error("no interface found with MAC {0}")]
+    InterfaceNotFound(String),
+
     #[error("PCI device error: {0}")]
     Pci(String),
 

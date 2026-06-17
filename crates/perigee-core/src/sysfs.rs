@@ -130,8 +130,5 @@ pub fn find_iface_by_mac(mac: &str) -> Result<String> {
             }
         }
     }
-    Err(PerigeeError::Sysfs(format!(
-        "no interface found with MAC {}",
-        mac
-    )))
+    Err(PerigeeError::InterfaceNotFound(mac.to_string()))
 }

@@ -4,6 +4,7 @@ use crate::vf;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
+use perigee_core::error::PerigeeError;
 use perigee_core::ipc::{
     EventLevel, FdbRuntimeStatus, ModuleState, ModuleStatus, ProfileDetailStatus, ProfileEvent,
     ProfileState, ProfileSummary, VfRuntimeStatus, VfSnapshot,
@@ -112,7 +113,7 @@ impl SriovModule {
                 }
                 Ok(Err(e)) => {
                     let msg = e.to_string();
-                    if msg.contains("no interface found with MAC") {
+                    if is_nic_offline(&e) {
                         rt.state = ProfileState::NicOffline;
                         warn!(profile = %name, "PF not found — NIC offline?");
                     } else {
@@ -256,6 +257,12 @@ impl SriovModule {
             }
             Err(e) => {
                 let msg = e.to_string();
+                if is_nic_offline(&e) {
+                    rt.state = ProfileState::NicOffline;
+                } else {
+                    rt.state = ProfileState::Error;
+                    rt.error_count += 1;
+                }
                 rt.last_error = Some(msg.clone());
                 push_event(
                     &mut rt.events,
@@ -266,6 +273,15 @@ impl SriovModule {
             }
         }
     }
+}
+
+/// Classify an apply error: true when it stems from the PF MAC not matching any
+/// present interface, i.e. the NIC is offline/absent rather than a real failure.
+/// Matches the typed `PerigeeError::InterfaceNotFound` anywhere in the error
+/// chain, so wrapping the error with `.context(...)` does not hide it.
+fn is_nic_offline(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<PerigeeError>()
+        .is_some_and(|pe| matches!(pe, PerigeeError::InterfaceNotFound(_)))
 }
 
 #[async_trait]
@@ -467,4 +483,28 @@ fn detect_bridge_for_pf(pf_iface: &str) -> Option<String> {
     std::fs::read_link(&bridge_path)
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nic_offline_detected_through_context_layer() {
+        // apply_profile wraps the find-iface error with .context(...). The fix
+        // must still recognise the inner typed error; the old string match on
+        // the outermost message did not.
+        let err = Err::<(), _>(PerigeeError::InterfaceNotFound("aa:bb:cc:dd:ee:ff".into()))
+            .context("cannot locate PF with MAC aa:bb:cc:dd:ee:ff")
+            .unwrap_err();
+        assert!(is_nic_offline(&err));
+    }
+
+    #[test]
+    fn other_sysfs_errors_are_not_nic_offline() {
+        let err = Err::<(), _>(PerigeeError::Sysfs("permission denied".into()))
+            .context("cannot locate PF")
+            .unwrap_err();
+        assert!(!is_nic_offline(&err));
+    }
 }
