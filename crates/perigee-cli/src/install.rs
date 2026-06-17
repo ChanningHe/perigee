@@ -51,7 +51,18 @@ pub fn install(force: bool) -> Result<()> {
 
         if !force && !confirm("Overwrite the existing binary?")? {
             println!("Skipped binary install.");
+        } else if service_is_active()
+            && !force
+            && !confirm("Service is running; stop it to replace the binary?")?
+        {
+            // A running daemon holds the executable inode, so an in-place copy
+            // would fail with ETXTBSY. Refuse rather than half-install.
+            println!("Skipped binary install (service still running).");
         } else {
+            if service_is_active() {
+                let _ = run_systemctl(&["stop", SERVICE_NAME]);
+                println!("Stopped {} for upgrade.", SERVICE_NAME);
+            }
             copy_binary(&current_exe)?;
         }
     } else if !is_same_path {
@@ -90,8 +101,9 @@ pub fn install(force: bool) -> Result<()> {
     run_systemctl(&["enable", SERVICE_NAME])?;
     println!("Service {} enabled.", SERVICE_NAME);
 
-    // Start separately so we can give a useful message on failure
-    match run_systemctl(&["start", SERVICE_NAME]) {
+    // Restart (not start) so an upgrade picks up the freshly installed binary
+    // even if the unit was left running. Done separately for a useful message.
+    match run_systemctl(&["restart", SERVICE_NAME]) {
         Ok(()) => {
             println!("Service {} started.", SERVICE_NAME);
         }
@@ -134,20 +146,30 @@ pub fn uninstall() -> Result<()> {
 // ── helpers ──
 
 fn copy_binary(src: &Path) -> Result<()> {
-    std::fs::copy(src, BINARY_INSTALL_PATH).with_context(|| {
-        format!(
-            "failed to copy {} to {}",
-            src.display(),
-            BINARY_INSTALL_PATH
-        )
-    })?;
+    // Write to a temp file then rename into place. Rename swaps the directory
+    // entry atomically and never hits ETXTBSY, so it works even if a process
+    // still holds the old binary's inode.
+    let dst = Path::new(BINARY_INSTALL_PATH);
+    let tmp = dst.with_extension("new");
+    std::fs::copy(src, &tmp)
+        .with_context(|| format!("failed to copy {} to {}", src.display(), tmp.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(BINARY_INSTALL_PATH, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
     }
+    std::fs::rename(&tmp, dst)
+        .with_context(|| format!("failed to install binary to {}", dst.display()))?;
     println!("Installed binary to {}", BINARY_INSTALL_PATH);
     Ok(())
+}
+
+fn service_is_active() -> bool {
+    Command::new("systemctl")
+        .args(["is-active", "--quiet", SERVICE_NAME])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn write_service_file() -> Result<()> {
