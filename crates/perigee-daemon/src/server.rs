@@ -1,5 +1,6 @@
 use anyhow::Result;
 use perigee_core::ipc::{DaemonStatus, Request, Response, SOCKET_PATH};
+use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -29,6 +30,10 @@ impl IpcServer {
         let _ = std::fs::remove_file(SOCKET_PATH);
 
         let listener = UnixListener::bind(SOCKET_PATH)?;
+        // Restrict the control socket to root only. The daemon performs
+        // privileged sysfs writes on behalf of any caller, so a world-accessible
+        // socket would let unprivileged local users trigger Apply/Reload/RetryFailed.
+        std::fs::set_permissions(SOCKET_PATH, std::fs::Permissions::from_mode(0o600))?;
         info!(path = SOCKET_PATH, "IPC server listening");
 
         loop {
