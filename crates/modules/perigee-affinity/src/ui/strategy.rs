@@ -264,7 +264,15 @@ fn render_manual_select(frame: &mut Frame, state: &AffinityState, area: ratatui:
         common::style_value(),
     )));
 
-    let para = Paragraph::new(lines).block(
+    // Scroll to follow the cursor so the selected CCD stays visible on hosts
+    // with many CCDs (e.g. dual-socket EPYC), without scrolling past the end.
+    // Two header lines precede the CCD rows. Borders take 2 rows.
+    let viewport = area.height.saturating_sub(2);
+    let max_scroll = (lines.len() as u16).saturating_sub(viewport);
+    let cursor_line = state.strategy_cursor as u16 + 2;
+    let scroll = (cursor_line + 1).saturating_sub(viewport).min(max_scroll);
+
+    let para = Paragraph::new(lines).scroll((scroll, 0)).block(
         Block::default()
             .title(Span::styled(
                 " Manual CCD Selection ",
