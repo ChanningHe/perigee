@@ -72,6 +72,12 @@ pub struct CpuTopology {
     pub packages: Vec<Package>,
     pub core_groups: Vec<CoreGroup>,
     pub detect_method: String,
+    /// Authoritative SMT sibling map: first-thread (physical) CPU id -> all
+    /// thread siblings (including itself), read directly from
+    /// `thread_siblings_list`. Used to expand a physical-core selection to
+    /// logical vCPUs without guessing the sysfs enumeration layout.
+    #[serde(skip)]
+    pub thread_siblings: HashMap<usize, Vec<usize>>,
 }
 
 impl CpuTopology {
@@ -111,11 +117,27 @@ pub fn detect() -> Result<CpuTopology> {
     }
 
     let arch = detect_architecture(&infos);
-    match arch {
-        Architecture::Amd => build_amd_topology(infos),
-        Architecture::IntelHybrid => build_intel_hybrid_topology(infos),
-        Architecture::Generic => build_generic_topology(infos),
-    }
+    let thread_siblings = build_sibling_map(&infos);
+    let mut topo = match arch {
+        Architecture::Amd => build_amd_topology(infos)?,
+        Architecture::IntelHybrid => build_intel_hybrid_topology(infos)?,
+        Architecture::Generic => build_generic_topology(infos)?,
+    };
+    topo.thread_siblings = thread_siblings;
+    Ok(topo)
+}
+
+/// Map each physical (first-thread) CPU to its full set of thread siblings,
+/// taken verbatim from the sysfs `thread_siblings_list`. This is the only
+/// authoritative source for SMT pairing; reconstructing it from CPU index
+/// arithmetic breaks on non-contiguous enumerations (e.g. AMD's cpu0/cpu1
+/// pairing where physical cores are the even ids).
+fn build_sibling_map(infos: &[CpuInfo]) -> HashMap<usize, Vec<usize>> {
+    infos
+        .iter()
+        .filter(|c| c.is_first_thread)
+        .map(|c| (c.id, c.thread_siblings.clone()))
+        .collect()
 }
 
 // ── CPU enumeration ──
@@ -317,6 +339,7 @@ fn build_amd_topology(infos: Vec<CpuInfo>) -> Result<CpuTopology> {
         packages,
         core_groups,
         detect_method: method.to_string(),
+        thread_siblings: HashMap::new(),
     })
 }
 
@@ -336,6 +359,7 @@ fn build_intel_hybrid_topology(infos: Vec<CpuInfo>) -> Result<CpuTopology> {
         packages,
         core_groups,
         detect_method: "intel_hybrid".to_string(),
+        thread_siblings: HashMap::new(),
     })
 }
 
@@ -377,6 +401,7 @@ fn build_generic_topology(infos: Vec<CpuInfo>) -> Result<CpuTopology> {
         packages,
         core_groups,
         detect_method: "generic".to_string(),
+        thread_siblings: HashMap::new(),
     })
 }
 

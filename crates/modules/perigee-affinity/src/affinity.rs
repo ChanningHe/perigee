@@ -519,27 +519,20 @@ fn expand_to_vcpus(physical_cores: &[usize], include_smt: bool, topo: &CpuTopolo
     if !include_smt || !topo.has_smt {
         let mut result = physical_cores.to_vec();
         result.sort();
+        result.dedup();
         return result;
     }
 
-    let mut phys_to_siblings: HashMap<usize, Vec<usize>> = HashMap::new();
-    for cg in &topo.core_groups {
-        let num_physical = cg.physical_cpus.len();
-        for (i, &phys) in cg.physical_cpus.iter().enumerate() {
-            let mut siblings = vec![phys];
-            if i + num_physical < cg.all_cpus.len() {
-                siblings.push(cg.all_cpus[i + num_physical]);
-            }
-            phys_to_siblings.insert(phys, siblings);
-        }
-    }
-
+    // Expand each physical core to its real thread siblings. The sibling map is
+    // read straight from sysfs (thread_siblings_list), so this is correct on any
+    // enumeration layout — unlike index arithmetic over a sorted all_cpus list,
+    // which mispaired cores on AMD (cpu0/cpu1 siblings) and pinned VMs to the
+    // wrong logical CPUs.
     let mut result = Vec::with_capacity(physical_cores.len() * 2);
     for &phys in physical_cores {
-        if let Some(siblings) = phys_to_siblings.get(&phys) {
-            result.extend(siblings);
-        } else {
-            result.push(phys);
+        match topo.thread_siblings.get(&phys) {
+            Some(siblings) => result.extend(siblings.iter().copied()),
+            None => result.push(phys),
         }
     }
 
@@ -617,4 +610,52 @@ pub fn cpus_to_ccd_names(cpus: &[usize], core_groups: &[CoreGroup]) -> Vec<Strin
         }
     }
     names
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 4 physical cores, 2 threads each, AMD-style pairing: 0&1, 2&3, 4&5, 6&7.
+    /// Physical (first-thread) cores are the even ids — the layout the old
+    /// index-arithmetic expansion got wrong.
+    fn amd_smt_topo() -> CpuTopology {
+        let thread_siblings = HashMap::from([
+            (0, vec![0, 1]),
+            (2, vec![2, 3]),
+            (4, vec![4, 5]),
+            (6, vec![6, 7]),
+        ]);
+        CpuTopology {
+            architecture: Architecture::Amd,
+            total_cpus: 8,
+            total_cores: 4,
+            has_smt: true,
+            packages: Vec::new(),
+            core_groups: Vec::new(),
+            detect_method: "test".to_string(),
+            thread_siblings,
+        }
+    }
+
+    #[test]
+    fn smt_expansion_uses_real_siblings() {
+        let topo = amd_smt_topo();
+        // Selecting physical cores 0 and 2 must yield exactly their siblings.
+        // The old code paired 0 with all_cpus[0+4]=4, pinning the wrong CPUs.
+        assert_eq!(expand_to_vcpus(&[0, 2], true, &topo), vec![0, 1, 2, 3]);
+        assert_eq!(expand_to_vcpus(&[4, 6], true, &topo), vec![4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn smt_disabled_returns_physical_only() {
+        let topo = amd_smt_topo();
+        assert_eq!(expand_to_vcpus(&[0, 2], false, &topo), vec![0, 2]);
+    }
+
+    #[test]
+    fn unknown_physical_core_falls_back_to_itself() {
+        let topo = amd_smt_topo();
+        assert_eq!(expand_to_vcpus(&[6, 99], true, &topo), vec![6, 7, 99]);
+    }
 }
