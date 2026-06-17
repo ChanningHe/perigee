@@ -108,6 +108,9 @@ pub struct SriovState {
 
     pub status_detail: Option<ProfileDetailStatus>,
     pub status_error: Option<String>,
+    /// Vertical scroll offset (in lines) for the status view, which can exceed
+    /// the viewport on PFs with many VFs.
+    pub status_scroll: u16,
 }
 
 impl Default for SriovState {
@@ -138,6 +141,7 @@ impl SriovState {
             profile_statuses: HashMap::new(),
             status_detail: None,
             status_error: None,
+            status_scroll: 0,
         }
     }
 
@@ -453,7 +457,7 @@ pub async fn handle_profiles_input(sriov: &mut SriovState, key: KeyEvent) -> Sri
 pub fn render_status(
     frame: &mut Frame,
     daemon_online: bool,
-    sriov: &SriovState,
+    sriov: &mut SriovState,
     profile_idx: usize,
 ) {
     let chunks = Layout::default()
@@ -553,8 +557,7 @@ pub fn render_status(
                 common::style_muted(),
             )));
 
-            let max_show = 20;
-            for vf in detail.vfs.iter().take(max_show) {
+            for vf in detail.vfs.iter() {
                 let ok = vf.matches;
                 let vlan_str = vf
                     .configured
@@ -580,12 +583,6 @@ pub fn render_status(
                     ),
                 ]));
             }
-            if detail.vfs.len() > max_show {
-                lines.push(Line::from(Span::styled(
-                    format!("  ... and {} more VFs", detail.vfs.len() - max_show),
-                    common::style_muted(),
-                )));
-            }
         }
     } else if let Some(err) = &sriov.status_error {
         lines.push(section_hdr("── Runtime ──"));
@@ -608,17 +605,26 @@ pub fn render_status(
         )));
     }
 
-    let para = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(common::BORDER)),
-    );
+    // Clamp the scroll offset to the content height for the current viewport
+    // (borders consume 2 rows), so the view can't scroll past the last line.
+    let viewport = chunks[1].height.saturating_sub(2);
+    let max_scroll = (lines.len() as u16).saturating_sub(viewport);
+    sriov.status_scroll = sriov.status_scroll.min(max_scroll);
+
+    let para = Paragraph::new(lines)
+        .scroll((sriov.status_scroll, 0))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(common::BORDER)),
+        );
     frame.render_widget(para, chunks[1]);
 
     common::footer_bar(
         frame,
         chunks[2],
         &[
+            ("↑↓", "Scroll"),
             ("e", "Edit"),
             ("R", "Refresh"),
             ("a", "Apply"),
@@ -636,7 +642,15 @@ pub async fn handle_status_input(
         KeyCode::Esc | KeyCode::Char('q') => {
             sriov.status_detail = None;
             sriov.status_error = None;
+            sriov.status_scroll = 0;
             return SriovUiAction::NavigateTo(SriovScreen::Profiles);
+        }
+        KeyCode::Up => {
+            sriov.status_scroll = sriov.status_scroll.saturating_sub(1);
+        }
+        KeyCode::Down => {
+            // Upper bound is clamped in render against the viewport height.
+            sriov.status_scroll = sriov.status_scroll.saturating_add(1);
         }
         KeyCode::Char('e') => {
             if let Some((name, profile)) = sriov.profiles.get(profile_idx) {
@@ -694,6 +708,7 @@ async fn fetch_profile_status(sriov: &mut SriovState, profile_idx: usize) {
                 Ok(Response::ProfileDetail(detail)) => {
                     sriov.status_detail = Some(detail);
                     sriov.status_error = None;
+                    sriov.status_scroll = 0;
                 }
                 Ok(Response::Error { message }) => {
                     sriov.status_detail = None;

@@ -108,7 +108,7 @@ async fn main_loop(terminal: &mut DefaultTerminal, state: &mut AppState) -> Resu
             AppScreen::SriovStatus(idx) => perigee_sriov::ui::render_status(
                 frame,
                 state.daemon_online,
-                &state.sriov_state,
+                &mut state.sriov_state,
                 idx,
             ),
             AppScreen::SriovEditor(idx) => perigee_sriov::ui::render_editor(
