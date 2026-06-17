@@ -111,6 +111,8 @@ pub struct SriovState {
     /// Vertical scroll offset (in lines) for the status view, which can exceed
     /// the viewport on PFs with many VFs.
     pub status_scroll: u16,
+    /// Scroll offset for the editor's TOML preview, long with many VF overrides.
+    pub review_scroll: u16,
 }
 
 impl Default for SriovState {
@@ -142,6 +144,7 @@ impl SriovState {
             status_detail: None,
             status_error: None,
             status_scroll: 0,
+            review_scroll: 0,
         }
     }
 
@@ -196,6 +199,7 @@ impl SriovState {
         self.vlan_id_buf.clear();
         self.fdb_cursor = 0;
         self.edit_focus = None;
+        self.review_scroll = 0;
     }
 
     pub fn sync_vf_count_buf(&mut self) {
@@ -736,7 +740,7 @@ async fn fetch_profile_status(sriov: &mut SriovState, profile_idx: usize) {
 pub fn render_editor(
     frame: &mut Frame,
     daemon_online: bool,
-    sriov: &SriovState,
+    sriov: &mut SriovState,
     profile_idx: usize,
 ) {
     let chunks = Layout::default()
@@ -785,6 +789,7 @@ pub fn render_editor(
         EditorTab::Fdb => fdb_config::render(frame, sriov, chunks[2]),
         EditorTab::Review => review::render(frame, sriov, chunks[2]),
     }
+    // (other tab renderers take &SriovState and reborrow from the &mut)
 
     if sriov.active_tab != EditorTab::Review {
         if let Some(msg) = &sriov.message {
@@ -807,6 +812,7 @@ pub fn render_editor(
     } else if sriov.active_tab == EditorTab::Review {
         vec![
             ("Tab/◀▶", "Switch Tab"),
+            ("↑↓", "Scroll"),
             ("Ctrl+S", "Save Only"),
             ("Enter", "Save & Apply"),
             ("Esc", "Back"),

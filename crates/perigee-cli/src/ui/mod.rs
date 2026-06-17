@@ -114,13 +114,13 @@ async fn main_loop(terminal: &mut DefaultTerminal, state: &mut AppState) -> Resu
             AppScreen::SriovEditor(idx) => perigee_sriov::ui::render_editor(
                 frame,
                 state.daemon_online,
-                &state.sriov_state,
+                &mut state.sriov_state,
                 idx,
             ),
             AppScreen::SriovNewEditor => perigee_sriov::ui::render_editor(
                 frame,
                 state.daemon_online,
-                &state.sriov_state,
+                &mut state.sriov_state,
                 usize::MAX,
             ),
             AppScreen::AffinityTopology => perigee_affinity::ui::render_topology(

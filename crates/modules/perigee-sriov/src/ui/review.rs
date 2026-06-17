@@ -1,4 +1,4 @@
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent};
 use perigee_tui as common;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -10,7 +10,7 @@ use ratatui::{
 
 use super::SriovState;
 
-pub fn render(frame: &mut Frame, sriov: &SriovState, area: Rect) {
+pub fn render(frame: &mut Frame, sriov: &mut SriovState, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -159,7 +159,7 @@ fn render_summary(frame: &mut Frame, sriov: &SriovState, area: Rect) {
     frame.render_widget(para, area);
 }
 
-fn render_toml_preview(frame: &mut Frame, sriov: &SriovState, area: Rect) {
+fn render_toml_preview(frame: &mut Frame, sriov: &mut SriovState, area: Rect) {
     let lines = if let Some(profile) = &sriov.editing_profile {
         let name = if sriov.editing_name.trim().is_empty() {
             "unnamed"
@@ -193,6 +193,12 @@ fn render_toml_preview(frame: &mut Frame, sriov: &SriovState, area: Rect) {
         ))]
     };
 
+    // Clamp scroll to content height (borders take 2 rows) so a long preview
+    // (many VF overrides) stays reachable instead of clipping silently.
+    let viewport = area.height.saturating_sub(2);
+    let max_scroll = (lines.len() as u16).saturating_sub(viewport);
+    sriov.review_scroll = sriov.review_scroll.min(max_scroll);
+
     let para = Paragraph::new(lines)
         .block(
             Block::default()
@@ -203,10 +209,16 @@ fn render_toml_preview(frame: &mut Frame, sriov: &SriovState, area: Rect) {
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(common::BORDER)),
         )
-        .scroll((0, 0));
+        .scroll((sriov.review_scroll, 0));
     frame.render_widget(para, area);
 }
 
-pub fn handle_input(_sriov: &mut SriovState, _key: KeyEvent) {
-    // Enter on Review tab is handled by handle_editor_input (save & apply)
+pub fn handle_input(sriov: &mut SriovState, key: KeyEvent) {
+    // Enter / Ctrl+S on the Review tab are handled by handle_editor_input;
+    // here we only scroll the TOML preview. Upper bound is clamped in render.
+    match key.code {
+        KeyCode::Up => sriov.review_scroll = sriov.review_scroll.saturating_sub(1),
+        KeyCode::Down => sriov.review_scroll = sriov.review_scroll.saturating_add(1),
+        _ => {}
+    }
 }
