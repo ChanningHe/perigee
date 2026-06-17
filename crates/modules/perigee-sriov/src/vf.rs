@@ -14,6 +14,19 @@ pub fn apply_profile(profile_name: &str, config: &SriovProfileConfig) -> Result<
 
     info!(profile = %profile_name, pf = %pf_iface, mac = %pf_mac, "applying SR-IOV profile");
 
+    // Reject a bad config before touching any sysfs state.
+    config.validate()?;
+    if let Ok(total) = sysfs::read_sriov_totalvfs(&pf_iface) {
+        if config.num_vfs > total {
+            bail!(
+                "profile requests {} VFs but {} supports at most {}",
+                config.num_vfs,
+                pf_iface,
+                total
+            );
+        }
+    }
+
     let mut result = ApplyResult {
         pf_iface: pf_iface.clone(),
         total_vfs: config.num_vfs,

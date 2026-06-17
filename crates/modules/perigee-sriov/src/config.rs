@@ -1,3 +1,4 @@
+use anyhow::{bail, Context, Result};
 use perigee_core::mac::MacAddress;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -30,6 +31,40 @@ pub struct SriovProfileConfig {
 
 fn default_mac_strategy() -> MacStrategyConfig {
     MacStrategyConfig::Sequential
+}
+
+impl SriovProfileConfig {
+    /// Validate hardware-independent constraints. The VF count is checked
+    /// against the PF's sriov_totalvfs at apply time, where the device is known.
+    pub fn validate(&self) -> Result<()> {
+        if let Some(vlan) = &self.defaults.vlan {
+            vlan.validate().context("defaults")?;
+        }
+        for vf in &self.vf {
+            if let Some(vlan) = &vf.vlan {
+                vlan.validate()
+                    .with_context(|| format!("VF {}", vf.index))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl VlanConfig {
+    /// 802.1Q VLAN ids are 1-4094 (0 clears the tag, 4095 is reserved) and the
+    /// 802.1p priority (qos) is 0-7. The TUI enforces these, but a hand-edited
+    /// sriov.toml is unchecked until here.
+    pub fn validate(&self) -> Result<()> {
+        if !(1..=4094).contains(&self.id) {
+            bail!("VLAN id {} out of range (1-4094)", self.id);
+        }
+        if let Some(qos) = self.qos {
+            if qos > 7 {
+                bail!("VLAN qos {} out of range (0-7)", qos);
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -186,5 +221,28 @@ output_path = "/var/lib/vz/snippets/perigee-bridgefix.sh"
         assert_eq!(profile.vf[0].index, 0);
         assert_eq!(profile.vf[0].vlan.as_ref().unwrap().id, 100);
         assert_eq!(profile.fdb.mode, FdbMode::Hookscript);
+        assert!(profile.validate().is_ok());
+    }
+
+    fn vlan(id: u16, qos: Option<u8>) -> VlanConfig {
+        VlanConfig {
+            id,
+            qos,
+            proto: None,
+        }
+    }
+
+    #[test]
+    fn valid_vlan_passes() {
+        assert!(vlan(100, Some(7)).validate().is_ok());
+        assert!(vlan(1, None).validate().is_ok());
+        assert!(vlan(4094, Some(0)).validate().is_ok());
+    }
+
+    #[test]
+    fn out_of_range_vlan_rejected() {
+        assert!(vlan(0, None).validate().is_err());
+        assert!(vlan(4095, None).validate().is_err());
+        assert!(vlan(100, Some(8)).validate().is_err());
     }
 }
