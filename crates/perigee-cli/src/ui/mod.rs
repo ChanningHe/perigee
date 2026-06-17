@@ -69,35 +69,29 @@ impl AppState {
 
 /// Main TUI entry point (from `perigee` with no args).
 pub async fn run_app() -> Result<()> {
-    let mut terminal = tui::init()?;
+    let (mut terminal, _guard) = tui::init()?;
     let mut state = AppState::new();
-    let result = main_loop(&mut terminal, &mut state).await;
-    tui::restore()?;
-    result
+    main_loop(&mut terminal, &mut state).await
 }
 
 /// SR-IOV TUI entry (from `perigee sriov`).
 pub async fn run_sriov_tui() -> Result<()> {
-    let mut terminal = tui::init()?;
+    let (mut terminal, _guard) = tui::init()?;
     let mut state = AppState::new();
     state.screen = AppScreen::SriovProfiles;
     state.sriov_state.load_profiles();
     state.sriov_state.fetch_profile_statuses().await;
-    let result = main_loop(&mut terminal, &mut state).await;
-    tui::restore()?;
-    result
+    main_loop(&mut terminal, &mut state).await
 }
 
 /// CPU Affinity TUI entry (from `perigee affinity`).
 pub async fn run_affinity_tui() -> Result<()> {
-    let mut terminal = tui::init()?;
+    let (mut terminal, _guard) = tui::init()?;
     let mut state = AppState::new();
     state.screen = AppScreen::AffinityTopology;
     // preload() already called in AppState::new(); if data arrived, great;
     // otherwise topology_view will show "Loading..." until poll completes.
-    let result = main_loop(&mut terminal, &mut state).await;
-    tui::restore()?;
-    result
+    main_loop(&mut terminal, &mut state).await
 }
 
 async fn main_loop(terminal: &mut DefaultTerminal, state: &mut AppState) -> Result<()> {
