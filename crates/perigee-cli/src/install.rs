@@ -16,6 +16,9 @@ DefaultDependencies=no
 [Service]
 Type=notify
 NotifyAccess=main
+# Create the control socket (and any other files) with no group/other access,
+# closing the bind->chmod window on /run/perigee.sock.
+UMask=0077
 ExecStart=/usr/local/bin/perigee daemon
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
