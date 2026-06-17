@@ -1,8 +1,9 @@
 use anyhow::{bail, Context, Result};
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Event, EventKind, PollWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -10,6 +11,11 @@ use crate::config::FdbMode;
 
 const PVE_QEMU_DIR: &str = "/etc/pve/qemu-server";
 const PVE_LXC_DIR: &str = "/etc/pve/lxc";
+
+/// How often the FDB watcher rescans the PVE config dirs. `/etc/pve` is pmxcfs
+/// (a FUSE filesystem) where inotify does not deliver events, so a stat/content
+/// poll is the only reliable way to pick up VM config changes.
+const FDB_POLL_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Managed FDB entry tracking.
 #[derive(Debug, Clone)]
@@ -103,7 +109,9 @@ impl FdbManager {
         Ok(())
     }
 
-    /// Start the inotify watcher for daemon mode.
+    /// Start the polling watcher for daemon mode. Uses `PollWatcher` rather than
+    /// inotify because the watched dirs live on pmxcfs (FUSE), where inotify is
+    /// silent.
     pub async fn start_watcher(
         &self,
         mut shutdown: tokio::sync::broadcast::Receiver<()>,
@@ -122,13 +130,18 @@ impl FdbManager {
 
         let (tx, mut rx) = mpsc::channel(100);
 
-        let mut watcher = RecommendedWatcher::new(
+        // Content comparison catches in-file MAC changes that a size/mtime check
+        // would miss.
+        let poll_config = notify::Config::default()
+            .with_poll_interval(FDB_POLL_INTERVAL)
+            .with_compare_contents(true);
+        let mut watcher = PollWatcher::new(
             move |res: std::result::Result<Event, notify::Error>| {
                 if let Ok(event) = res {
                     let _ = tx.blocking_send(event);
                 }
             },
-            notify::Config::default(),
+            poll_config,
         )?;
 
         for dir in &[PVE_QEMU_DIR, PVE_LXC_DIR] {
@@ -138,7 +151,10 @@ impl FdbManager {
             }
         }
 
-        info!("FDB watcher started");
+        info!(
+            interval_secs = FDB_POLL_INTERVAL.as_secs(),
+            "FDB watcher started"
+        );
 
         loop {
             tokio::select! {
