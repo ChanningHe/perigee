@@ -16,10 +16,7 @@ pub struct IpcServer {
 }
 
 impl IpcServer {
-    pub fn new(
-        registry: Arc<Mutex<ModuleRegistry>>,
-        config: Arc<Mutex<toml::Value>>,
-    ) -> Self {
+    pub fn new(registry: Arc<Mutex<ModuleRegistry>>, config: Arc<Mutex<toml::Value>>) -> Self {
         Self {
             registry,
             start_time: Instant::now(),
@@ -112,26 +109,24 @@ async fn process_request(
                 modules: reg.statuses(),
             })
         }
-        Request::Reload => {
-            match crate::config::load_all_configs() {
-                Ok(new_config) => {
-                    let mut cfg = config.lock().await;
-                    *cfg = new_config.clone();
-                    let mut reg = registry.lock().await;
-                    for module in reg.all_mut() {
-                        if let Err(e) = module.reload(&new_config).await {
-                            return Response::Error {
-                                message: format!("reload failed for {}: {}", module.name(), e),
-                            };
-                        }
+        Request::Reload => match crate::config::load_all_configs() {
+            Ok(new_config) => {
+                let mut cfg = config.lock().await;
+                *cfg = new_config.clone();
+                let mut reg = registry.lock().await;
+                for module in reg.all_mut() {
+                    if let Err(e) = module.reload(&new_config).await {
+                        return Response::Error {
+                            message: format!("reload failed for {}: {}", module.name(), e),
+                        };
                     }
-                    Response::Ok
                 }
-                Err(e) => Response::Error {
-                    message: format!("config load failed: {}", e),
-                },
+                Response::Ok
             }
-        }
+            Err(e) => Response::Error {
+                message: format!("config load failed: {}", e),
+            },
+        },
         Request::ReloadModule { name } => {
             let new_config = match crate::config::load_all_configs() {
                 Ok(c) => c,
@@ -166,7 +161,7 @@ async fn process_request(
                 }
             } else {
                 Response::Error {
-                    message: format!("SR-IOV module not loaded"),
+                    message: "SR-IOV module not loaded".to_string(),
                 }
             }
         }

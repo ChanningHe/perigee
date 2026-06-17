@@ -76,7 +76,7 @@ pub fn generate(req: &AffinityRequest) -> Result<Vec<AffinityOption>> {
     }
 
     let physical_needed = if req.include_smt && req.topology.has_smt {
-        (req.cores_needed + 1) / 2
+        req.cores_needed.div_ceil(2)
     } else {
         req.cores_needed
     };
@@ -105,7 +105,7 @@ pub fn generate_manual(
     }
 
     let physical_needed = if req.include_smt && req.topology.has_smt {
-        (req.cores_needed + 1) / 2
+        req.cores_needed.div_ceil(2)
     } else {
         req.cores_needed
     };
@@ -148,7 +148,10 @@ pub fn generate_manual(
 
 // ── AMD strategies ──
 
-fn generate_amd_options(req: &AffinityRequest, physical_needed: usize) -> Result<Vec<AffinityOption>> {
+fn generate_amd_options(
+    req: &AffinityRequest,
+    physical_needed: usize,
+) -> Result<Vec<AffinityOption>> {
     let mut options = vec![
         generate_single_ccd(req, physical_needed),
         generate_balanced(req, physical_needed),
@@ -184,10 +187,7 @@ fn generate_single_ccd(req: &AffinityRequest, physical_needed: usize) -> Affinit
     AffinityOption {
         strategy: Strategy::SingleCcd,
         name: "Single CCD".to_string(),
-        description: format!(
-            "Not available: no single CCD has {} cores",
-            physical_needed
-        ),
+        description: format!("Not available: no single CCD has {} cores", physical_needed),
         cpus: Vec::new(),
         affinity_str: String::new(),
         ccds_used: Vec::new(),
@@ -213,9 +213,7 @@ fn generate_balanced(req: &AffinityRequest, physical_needed: usize) -> AffinityO
         let cg = &req.topology.core_groups[idx];
         if cg.physical_cpus.len() >= physical_needed {
             let load = ccd_load.get(&idx);
-            let bound: HashSet<usize> = load
-                .map(|l| l.bound_cores.clone())
-                .unwrap_or_default();
+            let bound: HashSet<usize> = load.map(|l| l.bound_cores.clone()).unwrap_or_default();
 
             // Prefer unbound cores within this CCD
             let mut free: Vec<usize> = cg
@@ -268,9 +266,7 @@ fn generate_balanced(req: &AffinityRequest, physical_needed: usize) -> AffinityO
         }
         let cg = &req.topology.core_groups[idx];
         let load = ccd_load.get(&idx);
-        let bound: HashSet<usize> = load
-            .map(|l| l.bound_cores.clone())
-            .unwrap_or_default();
+        let bound: HashSet<usize> = load.map(|l| l.bound_cores.clone()).unwrap_or_default();
 
         let mut free: Vec<usize> = cg
             .physical_cpus
@@ -311,10 +307,7 @@ fn generate_balanced(req: &AffinityRequest, physical_needed: usize) -> AffinityO
     }
 }
 
-fn generate_manual_placeholder(
-    req: &AffinityRequest,
-    physical_needed: usize,
-) -> AffinityOption {
+fn generate_manual_placeholder(req: &AffinityRequest, physical_needed: usize) -> AffinityOption {
     let cores_per_ccd = req
         .topology
         .core_groups
@@ -322,7 +315,7 @@ fn generate_manual_placeholder(
         .map(|g| g.physical_cpus.len())
         .unwrap_or(8);
     let min_ccds = if cores_per_ccd > 0 {
-        (physical_needed + cores_per_ccd - 1) / cores_per_ccd
+        physical_needed.div_ceil(cores_per_ccd)
     } else {
         1
     };
@@ -340,7 +333,10 @@ fn generate_manual_placeholder(
 
 // ── Intel strategies ──
 
-fn generate_intel_options(req: &AffinityRequest, physical_needed: usize) -> Result<Vec<AffinityOption>> {
+fn generate_intel_options(
+    req: &AffinityRequest,
+    physical_needed: usize,
+) -> Result<Vec<AffinityOption>> {
     let mut options = vec![
         generate_p_cores_only(req, physical_needed),
         generate_e_cores_only(req, physical_needed),
@@ -471,10 +467,7 @@ struct CcdLoad {
     bound_cores: HashSet<usize>,
 }
 
-fn build_ccd_load(
-    core_groups: &[CoreGroup],
-    bindings: &[VmBinding],
-) -> HashMap<usize, CcdLoad> {
+fn build_ccd_load(core_groups: &[CoreGroup], bindings: &[VmBinding]) -> HashMap<usize, CcdLoad> {
     let mut cpu_to_ccd: HashMap<usize, usize> = HashMap::new();
     for (idx, cg) in core_groups.iter().enumerate() {
         for &cpu in &cg.all_cpus {

@@ -90,7 +90,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             Constraint::Length(1),          // gap
             Constraint::Length(4),          // daemon status
             Constraint::Length(1),          // gap
-            Constraint::Min(0),            // modules + fill
+            Constraint::Min(0),             // modules + fill
             Constraint::Length(2),          // footer
         ])
         .split(area);
@@ -199,7 +199,10 @@ pub fn render(frame: &mut Frame, state: &AppState) {
                 .fg(status_color)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!("    {}", hint), Style::default().fg(common::TEXT_DIM)),
+        Span::styled(
+            format!("    {}", hint),
+            Style::default().fg(common::TEXT_DIM),
+        ),
     ])];
 
     if let Some(ref msg) = state.daemon_message {
@@ -262,11 +265,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     );
     frame.render_widget(list, list_area);
 
-    common::footer_bar(
-        frame,
-        chunks[10],
-        &[("Enter", "Select"), ("q", "Quit")],
-    );
+    common::footer_bar(frame, chunks[10], &[("Enter", "Select"), ("q", "Quit")]);
 }
 
 fn centered_h(width: u16, area: Rect) -> Rect {

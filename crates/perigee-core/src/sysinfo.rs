@@ -107,11 +107,7 @@ fn clean_cpu_name(raw: &str) -> String {
 fn read_cpu_cores() -> u32 {
     fs::read_to_string("/proc/cpuinfo")
         .ok()
-        .map(|info| {
-            info.lines()
-                .filter(|l| l.starts_with("processor"))
-                .count() as u32
-        })
+        .map(|info| info.lines().filter(|l| l.starts_with("processor")).count() as u32)
         .unwrap_or(0)
 }
 
@@ -129,13 +125,11 @@ fn parse_meminfo_field(field: &str) -> u64 {
     fs::read_to_string("/proc/meminfo")
         .ok()
         .and_then(|info| {
-            info.lines()
-                .find(|l| l.starts_with(field))
-                .and_then(|l| {
-                    l.split_whitespace()
-                        .nth(1)
-                        .and_then(|v| v.parse::<u64>().ok())
-                })
+            info.lines().find(|l| l.starts_with(field)).and_then(|l| {
+                l.split_whitespace()
+                    .nth(1)
+                    .and_then(|v| v.parse::<u64>().ok())
+            })
         })
         .unwrap_or(0)
         / 1024 // kB -> MiB

@@ -327,10 +327,12 @@ esac
     std::fs::write(output_path, script)?;
 
     #[cfg(unix)]
-    {{
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(output_path, std::fs::Permissions::from_mode(0o755))?;
-    }}
+    {
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(output_path, std::fs::Permissions::from_mode(0o755))?;
+        }
+    }
 
     info!(path = %output_path.display(), "hookscript generated");
     Ok(())

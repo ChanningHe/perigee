@@ -8,7 +8,7 @@ use ratatui::{
     Frame,
 };
 
-use super::{AffinityState, AffinityScreen, AffinityUiAction};
+use super::{AffinityScreen, AffinityState, AffinityUiAction};
 use crate::affinity::Strategy;
 
 pub fn render(frame: &mut Frame, daemon_online: bool, state: &AffinityState) {
@@ -25,12 +25,17 @@ pub fn render(frame: &mut Frame, daemon_online: bool, state: &AffinityState) {
     common::header_bar(frame, chunks[0], "CPU Affinity › Configure", daemon_online);
 
     // Parameters section
-    let smt_label = if state.include_smt { "✓ Yes" } else { "✗ No" };
-    let vcpu_hint = if state.include_smt && state.topology.as_ref().map(|t| t.has_smt).unwrap_or(false) {
-        format!("  ({} vCPUs)", state.cores_needed * 2)
+    let smt_label = if state.include_smt {
+        "✓ Yes"
     } else {
-        String::new()
+        "✗ No"
     };
+    let vcpu_hint =
+        if state.include_smt && state.topology.as_ref().map(|t| t.has_smt).unwrap_or(false) {
+            format!("  ({} vCPUs)", state.cores_needed * 2)
+        } else {
+            String::new()
+        };
 
     let cores_display = if state.editing_cores {
         format!("[{}▎]", state.cores_input)
@@ -75,11 +80,7 @@ pub fn render(frame: &mut Frame, daemon_online: bool, state: &AffinityState) {
     let hints: Vec<(&str, &str)> = if state.editing_cores {
         vec![("Enter", "Confirm"), ("Esc", "Cancel")]
     } else if state.manual_mode {
-        vec![
-            ("Space", "Toggle"),
-            ("Enter", "Confirm"),
-            ("Esc", "Cancel"),
-        ]
+        vec![("Space", "Toggle"), ("Enter", "Confirm"), ("Esc", "Cancel")]
     } else {
         vec![
             ("↑↓", "Navigate"),
@@ -173,7 +174,9 @@ fn render_strategy_list(frame: &mut Frame, state: &AffinityState, area: ratatui:
 }
 
 fn render_manual_select(frame: &mut Frame, state: &AffinityState, area: ratatui::layout::Rect) {
-    let Some(ref topo) = state.topology else { return };
+    let Some(ref topo) = state.topology else {
+        return;
+    };
 
     let cores_per_ccd = topo
         .core_groups
@@ -196,11 +199,7 @@ fn render_manual_select(frame: &mut Frame, state: &AffinityState, area: ratatui:
 
     let bindings = state.existing_bindings();
     for (idx, cg) in topo.core_groups.iter().enumerate() {
-        let checked = state
-            .ccd_selected
-            .get(idx)
-            .copied()
-            .unwrap_or(false);
+        let checked = state.ccd_selected.get(idx).copied().unwrap_or(false);
         let check = if checked { "✓" } else { " " };
 
         let vm_count = bindings
@@ -286,9 +285,7 @@ pub fn handle_input(state: &mut AffinityState, key: KeyEvent) -> AffinityUiActio
     }
 
     match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => {
-            AffinityUiAction::NavigateTo(AffinityScreen::Topology)
-        }
+        KeyCode::Esc | KeyCode::Char('q') => AffinityUiAction::NavigateTo(AffinityScreen::Topology),
         KeyCode::Up | KeyCode::Char('k') => {
             if !state.strategies.is_empty() {
                 if state.strategy_cursor == 0 {

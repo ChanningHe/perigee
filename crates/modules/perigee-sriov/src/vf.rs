@@ -154,25 +154,11 @@ fn configure_single_vf(
 
     // Set trust
     let trust_val = if trust { "on" } else { "off" };
-    run_ip_link(&[
-        "set",
-        pf,
-        "vf",
-        &index.to_string(),
-        "trust",
-        trust_val,
-    ])?;
+    run_ip_link(&["set", pf, "vf", &index.to_string(), "trust", trust_val])?;
 
     // Set spoofchk
     let spoof_val = if spoofchk { "on" } else { "off" };
-    run_ip_link(&[
-        "set",
-        pf,
-        "vf",
-        &index.to_string(),
-        "spoofchk",
-        spoof_val,
-    ])?;
+    run_ip_link(&["set", pf, "vf", &index.to_string(), "spoofchk", spoof_val])?;
 
     // Always set VLAN: explicit id or 0 to clear stale VLAN
     {
@@ -258,11 +244,7 @@ fn parse_vf_lines(output: &str) -> Vec<VfActualState> {
         }
 
         let rest = parts[1];
-        let mac = rest
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_string();
+        let mac = rest.split_whitespace().next().unwrap_or("").to_string();
 
         let trust = rest.contains("trust on");
         let spoofchk = rest.contains("spoof checking on");

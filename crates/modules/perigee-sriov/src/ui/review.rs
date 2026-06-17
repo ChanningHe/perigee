@@ -76,10 +76,7 @@ fn render_summary(frame: &mut Frame, sriov: &SriovState, area: Rect) {
         lines.push(Line::from(vec![
             Span::styled("    ", Style::default()),
             Span::styled("MAC:        ", common::style_label()),
-            Span::styled(
-                format!("{:?}", profile.mac_strategy),
-                common::style_value(),
-            ),
+            Span::styled(format!("{:?}", profile.mac_strategy), common::style_value()),
         ]));
         lines.push(Line::from(vec![
             Span::styled("    ", Style::default()),
@@ -93,7 +90,11 @@ fn render_summary(frame: &mut Frame, sriov: &SriovState, area: Rect) {
             Span::styled("    ", Style::default()),
             Span::styled("SpoofChk:   ", common::style_label()),
             Span::styled(
-                if profile.defaults.spoofchk { "on" } else { "off" },
+                if profile.defaults.spoofchk {
+                    "on"
+                } else {
+                    "off"
+                },
                 common::style_value(),
             ),
         ]));
@@ -105,10 +106,7 @@ fn render_summary(frame: &mut Frame, sriov: &SriovState, area: Rect) {
         lines.push(Line::from(vec![
             Span::styled("    ", Style::default()),
             Span::styled("FDB:        ", common::style_label()),
-            Span::styled(
-                format!("{:?}", profile.fdb.mode),
-                common::style_value(),
-            ),
+            Span::styled(format!("{:?}", profile.fdb.mode), common::style_value()),
         ]));
 
         lines.push(Line::from(""));
@@ -140,10 +138,7 @@ fn render_summary(frame: &mut Frame, sriov: &SriovState, area: Rect) {
             } else {
                 common::style_warn()
             };
-            lines.push(Line::from(Span::styled(
-                format!("  {}", msg),
-                msg_style,
-            )));
+            lines.push(Line::from(Span::styled(format!("  {}", msg), msg_style)));
         }
     } else {
         lines.push(Line::from(Span::styled(

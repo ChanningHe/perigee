@@ -1,3 +1,6 @@
+use crate::config::{sriov_config_path, FdbMode, SriovFileConfig, SriovProfileConfig};
+use crate::fdb::FdbManager;
+use crate::vf;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
@@ -5,9 +8,6 @@ use perigee_core::ipc::{
     EventLevel, FdbRuntimeStatus, ModuleState, ModuleStatus, ProfileDetailStatus, ProfileEvent,
     ProfileState, ProfileSummary, VfRuntimeStatus, VfSnapshot,
 };
-use crate::config::{sriov_config_path, FdbMode, SriovFileConfig, SriovProfileConfig};
-use crate::fdb::FdbManager;
-use crate::vf;
 use std::collections::BTreeMap;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
@@ -30,6 +30,12 @@ pub struct SriovModule {
     profiles: BTreeMap<String, ProfileRuntime>,
     fdb_managers: Vec<FdbManager>,
     shutdown_tx: Option<broadcast::Sender<()>>,
+}
+
+impl Default for SriovModule {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SriovModule {
@@ -60,10 +66,9 @@ impl SriovModule {
             let profile_name = name.clone();
             let config = rt.config.clone();
 
-            let apply_result = tokio::task::spawn_blocking(move || {
-                vf::apply_profile(&profile_name, &config)
-            })
-            .await;
+            let apply_result =
+                tokio::task::spawn_blocking(move || vf::apply_profile(&profile_name, &config))
+                    .await;
 
             match apply_result {
                 Ok(Ok(result)) => {
@@ -72,23 +77,37 @@ impl SriovModule {
                     if result.is_success() {
                         rt.state = ProfileState::Active;
                         rt.last_error = None;
-                        push_event(&mut rt.events, EventLevel::Info, format!(
-                            "Applied: {} VFs created and configured", result.configured_vfs
-                        ));
+                        push_event(
+                            &mut rt.events,
+                            EventLevel::Info,
+                            format!(
+                                "Applied: {} VFs created and configured",
+                                result.configured_vfs
+                            ),
+                        );
                     } else if result.is_degraded() {
                         rt.state = ProfileState::Degraded;
                         rt.error_count += result.errors.len() as u32;
                         let msg = result.errors.join("; ");
                         rt.last_error = Some(msg.clone());
-                        push_event(&mut rt.events, EventLevel::Warn, format!(
-                            "Degraded: {}/{} VFs OK — {}", result.configured_vfs, result.total_vfs, msg
-                        ));
+                        push_event(
+                            &mut rt.events,
+                            EventLevel::Warn,
+                            format!(
+                                "Degraded: {}/{} VFs OK — {}",
+                                result.configured_vfs, result.total_vfs, msg
+                            ),
+                        );
                     } else {
                         rt.state = ProfileState::Error;
                         rt.error_count += result.errors.len() as u32;
                         let msg = result.errors.join("; ");
                         rt.last_error = Some(msg.clone());
-                        push_event(&mut rt.events, EventLevel::Error, format!("Failed: {}", msg));
+                        push_event(
+                            &mut rt.events,
+                            EventLevel::Error,
+                            format!("Failed: {}", msg),
+                        );
                     }
                 }
                 Ok(Err(e)) => {
@@ -120,7 +139,8 @@ impl SriovModule {
                 continue;
             }
 
-            let pf_iface = match perigee_core::sysfs::find_iface_by_mac(&rt.config.mac.to_string()) {
+            let pf_iface = match perigee_core::sysfs::find_iface_by_mac(&rt.config.mac.to_string())
+            {
                 Ok(iface) => iface,
                 Err(_) => continue,
             };
@@ -202,7 +222,7 @@ impl SriovModule {
             .get(profile_name)
             .map(|rt| {
                 let len = rt.events.len();
-                let start = if len > limit { len - limit } else { 0 };
+                let start = len.saturating_sub(limit);
                 rt.events[start..].to_vec()
             })
             .unwrap_or_default()
@@ -226,14 +246,22 @@ impl SriovModule {
                 } else {
                     let msg = result.errors.join("; ");
                     rt.last_error = Some(msg.clone());
-                    push_event(&mut rt.events, EventLevel::Warn, format!("Retry partial: {}", msg));
+                    push_event(
+                        &mut rt.events,
+                        EventLevel::Warn,
+                        format!("Retry partial: {}", msg),
+                    );
                 }
                 Ok(())
             }
             Err(e) => {
                 let msg = e.to_string();
                 rt.last_error = Some(msg.clone());
-                push_event(&mut rt.events, EventLevel::Error, format!("Retry failed: {}", msg));
+                push_event(
+                    &mut rt.events,
+                    EventLevel::Error,
+                    format!("Retry failed: {}", msg),
+                );
                 Err(e)
             }
         }
@@ -280,7 +308,8 @@ impl Module for SriovModule {
     async fn reload(&mut self, config: &toml::Value) -> Result<()> {
         let new_profiles = Self::load_profiles(config);
 
-        self.profiles.retain(|name, _| new_profiles.contains_key(name));
+        self.profiles
+            .retain(|name, _| new_profiles.contains_key(name));
 
         for (name, cfg) in new_profiles {
             if let Some(rt) = self.profiles.get_mut(&name) {
@@ -303,7 +332,10 @@ impl Module for SriovModule {
             }
         }
 
-        info!(profiles = self.profiles.len(), "SR-IOV module reloaded config");
+        info!(
+            profiles = self.profiles.len(),
+            "SR-IOV module reloaded config"
+        );
         Ok(())
     }
 
@@ -365,10 +397,7 @@ fn push_event(events: &mut Vec<ProfileEvent>, level: EventLevel, message: String
     }
 }
 
-fn build_vf_status(
-    config: &SriovProfileConfig,
-    pf_iface: Option<&str>,
-) -> Vec<VfRuntimeStatus> {
+fn build_vf_status(config: &SriovProfileConfig, pf_iface: Option<&str>) -> Vec<VfRuntimeStatus> {
     let actual_states = pf_iface
         .and_then(|pf| vf::read_actual_vf_states(pf).ok())
         .unwrap_or_default();

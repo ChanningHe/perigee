@@ -10,7 +10,7 @@ use ratatui::{
 
 use super::{AffinityScreen, AffinityState, AffinityUiAction};
 use crate::affinity::{cpus_to_ccd_names, parse_affinity_str};
-use crate::config::{AffinityFileConfig, affinity_config_path};
+use crate::config::{affinity_config_path, AffinityFileConfig};
 use crate::topology::Architecture;
 
 pub fn render(frame: &mut Frame, daemon_online: bool, state: &mut AffinityState) {
@@ -71,12 +71,16 @@ pub fn render(frame: &mut Frame, daemon_online: bool, state: &mut AffinityState)
             if auto_enabled {
                 Span::styled(
                     "Enabled",
-                    Style::default().fg(common::SUCCESS).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(common::SUCCESS)
+                        .add_modifier(Modifier::BOLD),
                 )
             } else {
                 Span::styled(
                     "Disabled",
-                    Style::default().fg(common::ERROR).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(common::ERROR)
+                        .add_modifier(Modifier::BOLD),
                 )
             },
             Span::styled(
@@ -154,19 +158,15 @@ pub fn render(frame: &mut Frame, daemon_online: bool, state: &mut AffinityState)
             for vm in &state.vms {
                 let cfg = state.vm_configs.get(&vm.vmid);
                 let cores = cfg.map(|c| c.cores).unwrap_or(0);
-                let (aff_str, ccd_str) =
-                    if let Some(aff) = cfg.and_then(|c| c.affinity.as_ref()) {
-                        bound += 1;
-                        let cpus = parse_affinity_str(aff);
-                        let ccds = cpus_to_ccd_names(&cpus, &topo.core_groups);
-                        let ccd_ids: Vec<String> = ccds
-                            .iter()
-                            .map(|n| extract_ccd_id(n))
-                            .collect();
-                        (aff.to_string(), format!("[{}]", ccd_ids.join(",")))
-                    } else {
-                        ("—".to_string(), "—".to_string())
-                    };
+                let (aff_str, ccd_str) = if let Some(aff) = cfg.and_then(|c| c.affinity.as_ref()) {
+                    bound += 1;
+                    let cpus = parse_affinity_str(aff);
+                    let ccds = cpus_to_ccd_names(&cpus, &topo.core_groups);
+                    let ccd_ids: Vec<String> = ccds.iter().map(|n| extract_ccd_id(n)).collect();
+                    (aff.to_string(), format!("[{}]", ccd_ids.join(",")))
+                } else {
+                    ("—".to_string(), "—".to_string())
+                };
 
                 let status_dot = if vm.status == "running" {
                     Span::styled("● ", Style::default().fg(common::SUCCESS))
@@ -295,11 +295,7 @@ fn build_ccd_line<'a>(
     bar_width: usize,
 ) -> Line<'a> {
     let unique = stats.unique_threads;
-    let filled = if threads > 0 {
-        (unique * bar_width) / threads
-    } else {
-        0
-    };
+    let filled = (unique * bar_width).checked_div(threads).unwrap_or(0);
     let empty = bar_width - filled;
 
     let bar_color = if unique == 0 {
@@ -335,13 +331,13 @@ fn build_ccd_line<'a>(
     }
 
     spans.extend([
-        Span::styled(
-            format!("{}C/{}T  ", cores, threads),
-            common::style_value(),
-        ),
+        Span::styled(format!("{}C/{}T  ", cores, threads), common::style_value()),
         Span::styled("█".repeat(filled), Style::default().fg(bar_color)),
         Span::styled("░".repeat(empty), Style::default().fg(common::TEXT_MUTED)),
-        Span::styled(format!("  {}", label), Style::default().fg(common::TEXT_DIM)),
+        Span::styled(
+            format!("  {}", label),
+            Style::default().fg(common::TEXT_DIM),
+        ),
     ]);
 
     Line::from(spans)

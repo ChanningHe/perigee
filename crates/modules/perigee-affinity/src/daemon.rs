@@ -14,6 +14,12 @@ pub struct AffinityModule {
     last_error: Option<String>,
 }
 
+impl Default for AffinityModule {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AffinityModule {
     pub fn new() -> Self {
         Self {
@@ -68,7 +74,7 @@ impl AffinityModule {
         }
 
         // Sort by cores descending (allocate large VMs first)
-        vm_entries.sort_by(|a, b| b.2.cmp(&a.2));
+        vm_entries.sort_by_key(|e| std::cmp::Reverse(e.2));
 
         // Build reserved cores set
         let reserve = self.config.reserve_cores;
@@ -158,8 +164,8 @@ impl perigee_daemon::module::Module for AffinityModule {
     async fn init(&mut self, config: &toml::Value) -> anyhow::Result<()> {
         if let Some(aff_val) = config.get("affinity") {
             let aff_str = toml::to_string(aff_val)?;
-            let parsed: AffinityFileConfig = toml::from_str(&format!("[affinity]\n{}", aff_str))
-                .unwrap_or_default();
+            let parsed: AffinityFileConfig =
+                toml::from_str(&format!("[affinity]\n{}", aff_str)).unwrap_or_default();
             self.config = parsed.affinity;
         } else {
             let path = crate::config::affinity_config_path();
@@ -202,8 +208,8 @@ impl perigee_daemon::module::Module for AffinityModule {
     async fn reload(&mut self, config: &toml::Value) -> anyhow::Result<()> {
         if let Some(aff_val) = config.get("affinity") {
             let aff_str = toml::to_string(aff_val)?;
-            let parsed: AffinityFileConfig = toml::from_str(&format!("[affinity]\n{}", aff_str))
-                .unwrap_or_default();
+            let parsed: AffinityFileConfig =
+                toml::from_str(&format!("[affinity]\n{}", aff_str)).unwrap_or_default();
             self.config = parsed.affinity;
         } else {
             let path = crate::config::affinity_config_path();

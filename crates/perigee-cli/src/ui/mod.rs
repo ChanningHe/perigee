@@ -104,34 +104,49 @@ async fn main_loop(terminal: &mut DefaultTerminal, state: &mut AppState) -> Resu
     while !state.should_quit {
         state.poll_host_info();
         state.affinity_state.poll_preload();
-        terminal.draw(|frame| {
-            match state.screen {
-                AppScreen::Home => home::render(frame, state),
-                AppScreen::SriovProfiles => {
-                    perigee_sriov::ui::render_profiles(frame, state.daemon_online, &state.sriov_state)
-                }
-                AppScreen::SriovStatus(idx) => {
-                    perigee_sriov::ui::render_status(frame, state.daemon_online, &state.sriov_state, idx)
-                }
-                AppScreen::SriovEditor(idx) => {
-                    perigee_sriov::ui::render_editor(frame, state.daemon_online, &state.sriov_state, idx)
-                }
-                AppScreen::SriovNewEditor => {
-                    perigee_sriov::ui::render_editor(frame, state.daemon_online, &state.sriov_state, usize::MAX)
-                }
-                AppScreen::AffinityTopology => {
-                    perigee_affinity::ui::render_topology(frame, state.daemon_online, &mut state.affinity_state)
-                }
-                AppScreen::AffinityStrategy => {
-                    perigee_affinity::ui::render_strategy(frame, state.daemon_online, &state.affinity_state)
-                }
-                AppScreen::AffinityApply => {
-                    perigee_affinity::ui::render_apply(frame, state.daemon_online, &state.affinity_state)
-                }
-                AppScreen::AffinityAutoApply => {
-                    perigee_affinity::ui::render_auto_apply(frame, state.daemon_online, &state.affinity_state)
-                }
+        terminal.draw(|frame| match state.screen {
+            AppScreen::Home => home::render(frame, state),
+            AppScreen::SriovProfiles => {
+                perigee_sriov::ui::render_profiles(frame, state.daemon_online, &state.sriov_state)
             }
+            AppScreen::SriovStatus(idx) => perigee_sriov::ui::render_status(
+                frame,
+                state.daemon_online,
+                &state.sriov_state,
+                idx,
+            ),
+            AppScreen::SriovEditor(idx) => perigee_sriov::ui::render_editor(
+                frame,
+                state.daemon_online,
+                &state.sriov_state,
+                idx,
+            ),
+            AppScreen::SriovNewEditor => perigee_sriov::ui::render_editor(
+                frame,
+                state.daemon_online,
+                &state.sriov_state,
+                usize::MAX,
+            ),
+            AppScreen::AffinityTopology => perigee_affinity::ui::render_topology(
+                frame,
+                state.daemon_online,
+                &mut state.affinity_state,
+            ),
+            AppScreen::AffinityStrategy => perigee_affinity::ui::render_strategy(
+                frame,
+                state.daemon_online,
+                &state.affinity_state,
+            ),
+            AppScreen::AffinityApply => perigee_affinity::ui::render_apply(
+                frame,
+                state.daemon_online,
+                &state.affinity_state,
+            ),
+            AppScreen::AffinityAutoApply => perigee_affinity::ui::render_auto_apply(
+                frame,
+                state.daemon_online,
+                &state.affinity_state,
+            ),
         })?;
 
         if event::poll(std::time::Duration::from_millis(100))? {
@@ -142,50 +157,63 @@ async fn main_loop(terminal: &mut DefaultTerminal, state: &mut AppState) -> Resu
                 match state.screen {
                     AppScreen::Home => home::handle_input(state, key).await,
                     AppScreen::SriovProfiles => {
-                        let action = perigee_sriov::ui::handle_profiles_input(
-                            &mut state.sriov_state, key,
-                        ).await;
+                        let action =
+                            perigee_sriov::ui::handle_profiles_input(&mut state.sriov_state, key)
+                                .await;
                         apply_sriov_action(state, action);
                     }
                     AppScreen::SriovStatus(idx) => {
                         let action = perigee_sriov::ui::handle_status_input(
-                            &mut state.sriov_state, key, idx,
-                        ).await;
+                            &mut state.sriov_state,
+                            key,
+                            idx,
+                        )
+                        .await;
                         apply_sriov_action(state, action);
                     }
                     AppScreen::SriovEditor(idx) => {
                         let action = perigee_sriov::ui::handle_editor_input(
-                            &mut state.sriov_state, key, Some(idx),
-                        ).await;
+                            &mut state.sriov_state,
+                            key,
+                            Some(idx),
+                        )
+                        .await;
                         apply_sriov_action(state, action);
                     }
                     AppScreen::SriovNewEditor => {
                         let action = perigee_sriov::ui::handle_editor_input(
-                            &mut state.sriov_state, key, None,
-                        ).await;
+                            &mut state.sriov_state,
+                            key,
+                            None,
+                        )
+                        .await;
                         apply_sriov_action(state, action);
                     }
                     AppScreen::AffinityTopology => {
                         let action = perigee_affinity::ui::handle_topology_input(
-                            &mut state.affinity_state, key,
+                            &mut state.affinity_state,
+                            key,
                         );
                         apply_affinity_action(state, action);
                     }
                     AppScreen::AffinityStrategy => {
                         let action = perigee_affinity::ui::handle_strategy_input(
-                            &mut state.affinity_state, key,
+                            &mut state.affinity_state,
+                            key,
                         );
                         apply_affinity_action(state, action);
                     }
                     AppScreen::AffinityApply => {
                         let action = perigee_affinity::ui::handle_apply_input(
-                            &mut state.affinity_state, key,
+                            &mut state.affinity_state,
+                            key,
                         );
                         apply_affinity_action(state, action);
                     }
                     AppScreen::AffinityAutoApply => {
                         let action = perigee_affinity::ui::handle_auto_apply_input(
-                            &mut state.affinity_state, key,
+                            &mut state.affinity_state,
+                            key,
                         );
                         apply_affinity_action(state, action);
                     }
@@ -215,7 +243,7 @@ fn apply_affinity_action(state: &mut AppState, action: perigee_affinity::ui::Aff
 }
 
 fn apply_sriov_action(state: &mut AppState, action: perigee_sriov::ui::SriovUiAction) {
-    use perigee_sriov::ui::{SriovUiAction, SriovScreen};
+    use perigee_sriov::ui::{SriovScreen, SriovUiAction};
     match action {
         SriovUiAction::None => {}
         SriovUiAction::GoBack => {

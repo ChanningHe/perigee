@@ -40,8 +40,7 @@ async fn main() -> Result<()> {
 async fn run_daemon() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .json()
         .init();
@@ -173,15 +172,17 @@ async fn handle_sriov_cli(action: SriovAction) -> Result<()> {
             if let Some(p) = config.sriov.get(&profile) {
                 println!("Profile:      {}", profile);
                 println!("PF MAC:       {}", p.mac);
-                let pf_iface =
-                    perigee_core::sysfs::find_iface_by_mac(&p.mac.to_string()).ok();
+                let pf_iface = perigee_core::sysfs::find_iface_by_mac(&p.mac.to_string()).ok();
                 println!(
                     "PF Iface:     {}",
                     pf_iface.as_deref().unwrap_or("not found")
                 );
                 println!("VF Count:     {}", p.num_vfs);
                 println!("MAC Strategy: {:?}", p.mac_strategy);
-                println!("Trust:        {}", if p.defaults.trust { "on" } else { "off" });
+                println!(
+                    "Trust:        {}",
+                    if p.defaults.trust { "on" } else { "off" }
+                );
                 println!(
                     "SpoofChk:     {}",
                     if p.defaults.spoofchk { "on" } else { "off" }
@@ -189,10 +190,8 @@ async fn handle_sriov_cli(action: SriovAction) -> Result<()> {
                 println!("FDB Mode:     {:?}", p.fdb.mode);
 
                 if let Some(iface) = pf_iface {
-                    let current_vfs =
-                        perigee_core::sysfs::read_sriov_numvfs(&iface).unwrap_or(0);
-                    let max_vfs =
-                        perigee_core::sysfs::read_sriov_totalvfs(&iface).unwrap_or(0);
+                    let current_vfs = perigee_core::sysfs::read_sriov_numvfs(&iface).unwrap_or(0);
+                    let max_vfs = perigee_core::sysfs::read_sriov_totalvfs(&iface).unwrap_or(0);
                     println!("\nSysfs:");
                     println!("  Current VFs: {}", current_vfs);
                     println!("  Max VFs:     {}", max_vfs);
@@ -203,10 +202,17 @@ async fn handle_sriov_cli(action: SriovAction) -> Result<()> {
             Ok(())
         }
         SriovAction::Events { profile, limit } => {
-            let resp = perigee_core::client::IpcClient::send(&Request::ProfileEvents { profile, limit }).await?;
+            let resp =
+                perigee_core::client::IpcClient::send(&Request::ProfileEvents { profile, limit })
+                    .await?;
             if let Response::Events(events) = resp {
                 for event in &events {
-                    println!("{} [{}] {}", event.timestamp.format("%H:%M:%S"), event.level, event.message);
+                    println!(
+                        "{} [{}] {}",
+                        event.timestamp.format("%H:%M:%S"),
+                        event.level,
+                        event.message
+                    );
                 }
                 if events.is_empty() {
                     println!("No events.");
@@ -239,7 +245,8 @@ async fn handle_sriov_cli(action: SriovAction) -> Result<()> {
             Ok(())
         }
         SriovAction::Retry { profile } => {
-            let resp = perigee_core::client::IpcClient::send(&Request::RetryFailed { profile }).await?;
+            let resp =
+                perigee_core::client::IpcClient::send(&Request::RetryFailed { profile }).await?;
             match resp {
                 Response::Ok => println!("Retry initiated."),
                 Response::Error { message } => eprintln!("Error: {}", message),
@@ -320,12 +327,12 @@ async fn handle_affinity_cli(action: AffinityAction) -> Result<()> {
             let existing: Vec<perigee_affinity::affinity::VmBinding> = all_configs
                 .iter()
                 .filter_map(|(vmid, cfg)| {
-                    cfg.affinity.as_ref().map(|a| {
-                        perigee_affinity::affinity::VmBinding {
+                    cfg.affinity
+                        .as_ref()
+                        .map(|a| perigee_affinity::affinity::VmBinding {
                             vmid: *vmid,
                             cpus: perigee_affinity::affinity::parse_affinity_str(a),
-                        }
-                    })
+                        })
                 })
                 .collect();
 
@@ -376,12 +383,12 @@ async fn handle_affinity_cli(action: AffinityAction) -> Result<()> {
                     if *vid == vmid {
                         return None;
                     }
-                    cfg.affinity.as_ref().map(|a| {
-                        perigee_affinity::affinity::VmBinding {
+                    cfg.affinity
+                        .as_ref()
+                        .map(|a| perigee_affinity::affinity::VmBinding {
                             vmid: *vid,
                             cpus: perigee_affinity::affinity::parse_affinity_str(a),
-                        }
-                    })
+                        })
                 })
                 .collect();
 
@@ -422,7 +429,7 @@ async fn handle_affinity_cli(action: AffinityAction) -> Result<()> {
                     vm_entries.push((vm.vmid, vm.name.clone(), cfg.cores));
                 }
             }
-            vm_entries.sort_by(|a, b| b.2.cmp(&a.2));
+            vm_entries.sort_by_key(|e| std::cmp::Reverse(e.2));
 
             let mut bindings: Vec<perigee_affinity::affinity::VmBinding> = Vec::new();
             for (vmid, name, cores) in &vm_entries {
@@ -444,7 +451,10 @@ async fn handle_affinity_cli(action: AffinityAction) -> Result<()> {
                     .or_else(|| options.iter().find(|o| o.available));
 
                 if let Some(o) = opt {
-                    println!("VM {} ({}): qm set {} --affinity {}", vmid, name, vmid, o.affinity_str);
+                    println!(
+                        "VM {} ({}): qm set {} --affinity {}",
+                        vmid, name, vmid, o.affinity_str
+                    );
                     if !dry_run {
                         match perigee_affinity::pve::set_affinity(*vmid, &o.affinity_str, false) {
                             Ok(()) => println!("  ✓ Applied"),
@@ -456,7 +466,10 @@ async fn handle_affinity_cli(action: AffinityAction) -> Result<()> {
                         cpus: o.cpus.clone(),
                     });
                 } else {
-                    eprintln!("VM {} ({}): no available strategy for {} cores", vmid, name, cores);
+                    eprintln!(
+                        "VM {} ({}): no available strategy for {} cores",
+                        vmid, name, cores
+                    );
                 }
             }
             Ok(())

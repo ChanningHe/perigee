@@ -40,44 +40,45 @@ pub fn render_general(frame: &mut Frame, sriov: &SriovState, area: Rect) {
         })
         .unwrap_or("Sequential");
 
-    let trust = profile
-        .as_ref()
-        .map(|p| p.defaults.trust)
-        .unwrap_or(true);
+    let trust = profile.as_ref().map(|p| p.defaults.trust).unwrap_or(true);
     let spoofchk = profile
         .as_ref()
         .map(|p| p.defaults.spoofchk)
         .unwrap_or(false);
 
-    let field_line = |idx: usize, label: &str, value: &str, is_editing: bool, hint: &str| -> Line<'static> {
-        let is_active = cursor == idx;
-        let indicator = if is_active { " ▸ " } else { "   " };
-        let val_style = if is_editing {
-            common::style_editing()
-        } else if is_active {
-            common::style_selected()
-        } else {
-            common::style_value()
-        };
-
-        Line::from(vec![
-            Span::styled(indicator.to_string(), if is_active {
-                Style::default().fg(common::SELECTED)
+    let field_line =
+        |idx: usize, label: &str, value: &str, is_editing: bool, hint: &str| -> Line<'static> {
+            let is_active = cursor == idx;
+            let indicator = if is_active { " ▸ " } else { "   " };
+            let val_style = if is_editing {
+                common::style_editing()
+            } else if is_active {
+                common::style_selected()
             } else {
-                common::style_muted()
-            }),
-            Span::styled(format!("{:<16}", label), common::style_label()),
-            Span::styled(value.to_string(), val_style),
-            Span::styled(
-                if is_active && !hint.is_empty() {
-                    format!("  {}", hint)
-                } else {
-                    String::new()
-                },
-                common::style_muted(),
-            ),
-        ])
-    };
+                common::style_value()
+            };
+
+            Line::from(vec![
+                Span::styled(
+                    indicator.to_string(),
+                    if is_active {
+                        Style::default().fg(common::SELECTED)
+                    } else {
+                        common::style_muted()
+                    },
+                ),
+                Span::styled(format!("{:<16}", label), common::style_label()),
+                Span::styled(value.to_string(), val_style),
+                Span::styled(
+                    if is_active && !hint.is_empty() {
+                        format!("  {}", hint)
+                    } else {
+                        String::new()
+                    },
+                    common::style_muted(),
+                ),
+            ])
+        };
 
     let lines = vec![
         Line::from(""),
@@ -162,8 +163,7 @@ pub fn handle_general_input(sriov: &mut SriovState, key: KeyEvent) {
             }
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            sriov.general_cursor =
-                (sriov.general_cursor + 1) % GENERAL_FIELDS;
+            sriov.general_cursor = (sriov.general_cursor + 1) % GENERAL_FIELDS;
         }
         KeyCode::Enter | KeyCode::Char(' ') => {
             ensure_editing_profile(sriov);
@@ -241,8 +241,7 @@ pub fn render_vf_table(frame: &mut Frame, sriov: &SriovState, area: Rect) {
                 .and_then(|o| o.mac.as_ref())
                 .map(|m| m.to_string())
                 .unwrap_or_else(|| "(auto)".to_string());
-            let is_editing_vlan = is_selected
-                && sriov.edit_focus == Some(EditFocus::VfVlanId);
+            let is_editing_vlan = is_selected && sriov.edit_focus == Some(EditFocus::VfVlanId);
             let vlan_str = if is_editing_vlan {
                 format!("[{}▎]", &sriov.vlan_id_buf)
             } else {
@@ -306,20 +305,56 @@ pub fn render_vf_table(frame: &mut Frame, sriov: &SriovState, area: Rect) {
                     "   VLAN ID (1-4094), 0/empty to remove.  ",
                     common::style_editing(),
                 ),
-                Span::styled(" Enter ", Style::default().fg(common::KEY_FG).bg(common::KEY_BG).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " Enter ",
+                    Style::default()
+                        .fg(common::KEY_FG)
+                        .bg(common::KEY_BG)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" confirm  ", common::style_muted()),
-                Span::styled(" Esc ", Style::default().fg(common::KEY_FG).bg(common::KEY_BG).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " Esc ",
+                    Style::default()
+                        .fg(common::KEY_FG)
+                        .bg(common::KEY_BG)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" cancel", common::style_muted()),
             ]));
         } else {
             lines.push(Line::from(vec![
-                Span::styled(" t ", Style::default().fg(common::KEY_FG).bg(common::KEY_BG).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " t ",
+                    Style::default()
+                        .fg(common::KEY_FG)
+                        .bg(common::KEY_BG)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" trust  ", common::style_muted()),
-                Span::styled(" s ", Style::default().fg(common::KEY_FG).bg(common::KEY_BG).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " s ",
+                    Style::default()
+                        .fg(common::KEY_FG)
+                        .bg(common::KEY_BG)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" spoofchk  ", common::style_muted()),
-                Span::styled(" v ", Style::default().fg(common::KEY_FG).bg(common::KEY_BG).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " v ",
+                    Style::default()
+                        .fg(common::KEY_FG)
+                        .bg(common::KEY_BG)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" vlan  ", common::style_muted()),
-                Span::styled(" d ", Style::default().fg(common::KEY_FG).bg(common::KEY_BG).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " d ",
+                    Style::default()
+                        .fg(common::KEY_FG)
+                        .bg(common::KEY_BG)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" delete override", common::style_muted()),
             ]));
         }
@@ -460,10 +495,7 @@ fn adjust_scroll(cursor: usize, scroll: &mut usize) {
 
 fn toggle_vf_field(
     sriov: &mut SriovState,
-    f: impl FnOnce(
-        &mut crate::config::VfOverride,
-        &crate::config::VfDefaults,
-    ),
+    f: impl FnOnce(&mut crate::config::VfOverride, &crate::config::VfDefaults),
 ) {
     let vf_idx = sriov.vf_table_cursor as u32;
     if let Some(ref mut profile) = sriov.editing_profile {

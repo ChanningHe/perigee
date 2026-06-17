@@ -280,8 +280,7 @@ fn detect_ccd_method(cpus: &[CpuInfo]) -> &'static str {
 
     let all_have_l3 = cpus.iter().all(|c| c.l3_cache_id >= 0);
     if all_have_l3 {
-        let unique: std::collections::HashSet<i32> =
-            cpus.iter().map(|c| c.l3_cache_id).collect();
+        let unique: std::collections::HashSet<i32> = cpus.iter().map(|c| c.l3_cache_id).collect();
         if unique.len() > 1 {
             return "l3_cache";
         }
@@ -427,11 +426,7 @@ fn group_by_ccd(cpus: &[CpuInfo], method: &str) -> Vec<CoreGroup> {
         cg.physical_cpus.dedup();
     }
 
-    list.sort_by(|a, b| {
-        a.package_id
-            .cmp(&b.package_id)
-            .then(a.id.cmp(&b.id))
-    });
+    list.sort_by(|a, b| a.package_id.cmp(&b.package_id).then(a.id.cmp(&b.id)));
 
     // Renumber CCD IDs per package
     let mut pkg_count: HashMap<usize, usize> = HashMap::new();
@@ -514,10 +509,7 @@ fn group_by_intel_core_type(cpus: &[CpuInfo]) -> Vec<CoreGroup> {
 fn build_packages(core_groups: &[CoreGroup]) -> Vec<Package> {
     let mut pkg_map: HashMap<usize, Vec<CoreGroup>> = HashMap::new();
     for cg in core_groups {
-        pkg_map
-            .entry(cg.package_id)
-            .or_default()
-            .push(cg.clone());
+        pkg_map.entry(cg.package_id).or_default().push(cg.clone());
     }
 
     let mut pkg_ids: Vec<usize> = pkg_map.keys().copied().collect();
@@ -539,15 +531,12 @@ fn build_packages(core_groups: &[CoreGroup]) -> Vec<Package> {
 // ── Sysfs helpers ──
 
 fn topo_path(cpu_id: usize, element: &str) -> PathBuf {
-    PathBuf::from(format!(
-        "{}/cpu{}/topology/{}",
-        SYSFS_BASE, cpu_id, element
-    ))
+    PathBuf::from(format!("{}/cpu{}/topology/{}", SYSFS_BASE, cpu_id, element))
 }
 
 fn read_int_file(path: &Path) -> Result<usize> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let content =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     content
         .trim()
         .parse::<usize>()

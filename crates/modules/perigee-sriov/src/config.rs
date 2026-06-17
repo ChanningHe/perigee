@@ -34,16 +34,12 @@ fn default_mac_strategy() -> MacStrategyConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum MacStrategyConfig {
+    #[default]
     Sequential,
     Random,
     Custom,
-}
-
-impl Default for MacStrategyConfig {
-    fn default() -> Self {
-        Self::Sequential
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,18 +88,13 @@ pub struct VlanConfig {
     pub proto: Option<VlanProto>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum VlanProto {
     #[serde(rename = "802.1Q")]
+    #[default]
     Dot1Q,
     #[serde(rename = "802.1ad")]
     Dot1Ad,
-}
-
-impl Default for VlanProto {
-    fn default() -> Self {
-        Self::Dot1Q
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,17 +120,13 @@ fn default_fdb_mode() -> FdbMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum FdbMode {
     #[serde(rename = "daemon_watch")]
+    #[default]
     DaemonWatch,
     Hookscript,
     Disabled,
-}
-
-impl Default for FdbMode {
-    fn default() -> Self {
-        Self::DaemonWatch
-    }
 }
 
 impl SriovFileConfig {

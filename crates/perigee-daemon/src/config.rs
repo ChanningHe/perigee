@@ -45,8 +45,8 @@ pub fn load_all_configs() -> Result<toml::Value> {
 fn load_single_config(path: &Path) -> Result<toml::map::Map<String, toml::Value>> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    let value: toml::Value = toml::from_str(&content)
-        .with_context(|| format!("failed to parse {}", path.display()))?;
+    let value: toml::Value =
+        toml::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))?;
     match value {
         toml::Value::Table(t) => Ok(t),
         _ => anyhow::bail!("{} is not a TOML table", path.display()),

@@ -4,11 +4,11 @@ pub mod result;
 pub mod review;
 pub mod vf_config;
 
+use crate::config::{sriov_config_path, SriovFileConfig, SriovProfileConfig};
+use crate::detect::PhysicalFunction;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use perigee_core::ipc::{ProfileDetailStatus, ProfileState, Request, Response};
 use perigee_tui as common;
-use crate::config::{sriov_config_path, SriovFileConfig, SriovProfileConfig};
-use crate::detect::PhysicalFunction;
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Modifier, Style},
@@ -47,7 +47,13 @@ pub enum EditorTab {
 }
 
 impl EditorTab {
-    pub const ALL: [Self; 5] = [Self::Pf, Self::General, Self::VfTable, Self::Fdb, Self::Review];
+    pub const ALL: [Self; 5] = [
+        Self::Pf,
+        Self::General,
+        Self::VfTable,
+        Self::Fdb,
+        Self::Review,
+    ];
 
     pub fn title(&self) -> &str {
         match self {
@@ -104,6 +110,12 @@ pub struct SriovState {
     pub status_error: Option<String>,
 }
 
+impl Default for SriovState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SriovState {
     pub fn new() -> Self {
         Self {
@@ -151,8 +163,7 @@ impl SriovState {
             for module in &status.modules {
                 if module.name == "sriov" {
                     for ps in &module.profiles {
-                        self.profile_statuses
-                            .insert(ps.name.clone(), ps.state);
+                        self.profile_statuses.insert(ps.name.clone(), ps.state);
                     }
                 }
             }
@@ -276,20 +287,14 @@ pub fn render_profiles(frame: &mut Frame, daemon_online: bool, sriov: &SriovStat
                 let selected = sriov.profile_list_state.selected() == Some(i);
                 let prefix = if selected { " ▸ " } else { "   " };
 
-                let status = sriov
-                    .profile_statuses
-                    .get(name)
-                    .copied();
-                let status_str = status
-                    .as_ref()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| {
-                        if daemon_online {
-                            "—".to_string()
-                        } else {
-                            "offline".to_string()
-                        }
-                    });
+                let status = sriov.profile_statuses.get(name).copied();
+                let status_str = status.as_ref().map(|s| s.to_string()).unwrap_or_else(|| {
+                    if daemon_online {
+                        "—".to_string()
+                    } else {
+                        "offline".to_string()
+                    }
+                });
                 let status_color = status
                     .as_ref()
                     .map(common::state_color)
@@ -322,13 +327,11 @@ pub fn render_profiles(frame: &mut Frame, daemon_online: bool, sriov: &SriovStat
                     ),
                     Span::styled(
                         format!("{:<10}", status_str),
-                        Style::default()
-                            .fg(status_color)
-                            .add_modifier(if selected {
-                                Modifier::BOLD
-                            } else {
-                                Modifier::empty()
-                            }),
+                        Style::default().fg(status_color).add_modifier(if selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
                     ),
                 ]))
             })
@@ -361,10 +364,7 @@ pub fn render_profiles(frame: &mut Frame, daemon_online: bool, sriov: &SriovStat
             height: 1,
         };
         frame.render_widget(
-            Paragraph::new(Span::styled(
-                format!("  {}", msg),
-                common::style_warn(),
-            )),
+            Paragraph::new(Span::styled(format!("  {}", msg), common::style_warn())),
             msg_area,
         );
     }
@@ -391,20 +391,14 @@ pub async fn handle_profiles_input(sriov: &mut SriovState, key: KeyEvent) -> Sri
         }
         KeyCode::Up | KeyCode::Char('k') => {
             if len > 0 {
-                let i = sriov
-                    .profile_list_state
-                    .selected()
-                    .unwrap_or(0);
+                let i = sriov.profile_list_state.selected().unwrap_or(0);
                 let new = if i == 0 { len - 1 } else { i - 1 };
                 sriov.profile_list_state.select(Some(new));
             }
         }
         KeyCode::Down | KeyCode::Char('j') => {
             if len > 0 {
-                let i = sriov
-                    .profile_list_state
-                    .selected()
-                    .unwrap_or(0);
+                let i = sriov.profile_list_state.selected().unwrap_or(0);
                 let new = if i >= len - 1 { 0 } else { i + 1 };
                 sriov.profile_list_state.select(Some(new));
             }
@@ -453,7 +447,12 @@ pub async fn handle_profiles_input(sriov: &mut SriovState, key: KeyEvent) -> Sri
 
 // ── Status view ──
 
-pub fn render_status(frame: &mut Frame, daemon_online: bool, sriov: &SriovState, profile_idx: usize) {
+pub fn render_status(
+    frame: &mut Frame,
+    daemon_online: bool,
+    sriov: &SriovState,
+    profile_idx: usize,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -467,9 +466,8 @@ pub fn render_status(frame: &mut Frame, daemon_online: bool, sriov: &SriovState,
         Some((n, p)) => (n.clone(), p.clone()),
         None => {
             common::header_bar(frame, chunks[0], "SR-IOV > Status", daemon_online);
-            let para = Paragraph::new("  Profile not found").block(
-                Block::default().borders(Borders::ALL),
-            );
+            let para =
+                Paragraph::new("  Profile not found").block(Block::default().borders(Borders::ALL));
             frame.render_widget(para, chunks[1]);
             common::footer_bar(frame, chunks[2], &[("Esc", "Back")]);
             return;
@@ -626,7 +624,11 @@ pub fn render_status(frame: &mut Frame, daemon_online: bool, sriov: &SriovState,
     );
 }
 
-pub async fn handle_status_input(sriov: &mut SriovState, key: KeyEvent, profile_idx: usize) -> SriovUiAction {
+pub async fn handle_status_input(
+    sriov: &mut SriovState,
+    key: KeyEvent,
+    profile_idx: usize,
+) -> SriovUiAction {
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             sriov.status_detail = None;
@@ -657,16 +659,14 @@ pub async fn handle_status_input(sriov: &mut SriovState, key: KeyEvent, profile_
                     .await
                     {
                         Ok(Response::Ok) => {
-                            sriov.message =
-                                Some(format!("Apply triggered for '{}'", profile_name));
+                            sriov.message = Some(format!("Apply triggered for '{}'", profile_name));
                             fetch_profile_status(sriov, profile_idx).await;
                         }
                         Ok(Response::Error { message }) => {
                             sriov.message = Some(format!("Apply error: {}", message));
                         }
                         _ => {
-                            sriov.message =
-                                Some("Unexpected daemon response".to_string());
+                            sriov.message = Some("Unexpected daemon response".to_string());
                         }
                     }
                 } else {
@@ -713,7 +713,12 @@ async fn fetch_profile_status(sriov: &mut SriovState, profile_idx: usize) {
 
 // ── Tab editor ──
 
-pub fn render_editor(frame: &mut Frame, daemon_online: bool, sriov: &SriovState, profile_idx: usize) {
+pub fn render_editor(
+    frame: &mut Frame,
+    daemon_online: bool,
+    sriov: &SriovState,
+    profile_idx: usize,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -865,10 +870,7 @@ async fn do_save(sriov: &mut SriovState) {
     sriov.edit_focus = None;
     match sriov.save_config() {
         Ok(()) => {
-            let mut msg = format!(
-                "✓ Config saved to {}",
-                sriov_config_path().display()
-            );
+            let mut msg = format!("✓ Config saved to {}", sriov_config_path().display());
             if perigee_core::client::IpcClient::is_daemon_running() {
                 match perigee_core::client::IpcClient::send(&Request::Reload).await {
                     Ok(Response::Ok) => {

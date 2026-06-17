@@ -34,10 +34,12 @@ pub fn detect_iommu() -> IommuStatus {
 fn detect_cpu_vendor_hint() -> String {
     if let Ok(cpuinfo) = fs::read_to_string("/proc/cpuinfo") {
         if cpuinfo.contains("GenuineIntel") {
-            return "Add 'intel_iommu=on iommu=pt' to GRUB_CMDLINE_LINUX in /etc/default/grub".to_string();
+            return "Add 'intel_iommu=on iommu=pt' to GRUB_CMDLINE_LINUX in /etc/default/grub"
+                .to_string();
         }
         if cpuinfo.contains("AuthenticAMD") {
-            return "Add 'amd_iommu=on iommu=pt' to GRUB_CMDLINE_LINUX in /etc/default/grub".to_string();
+            return "Add 'amd_iommu=on iommu=pt' to GRUB_CMDLINE_LINUX in /etc/default/grub"
+                .to_string();
         }
     }
     "Add 'intel_iommu=on' or 'amd_iommu=on' and 'iommu=pt' to kernel parameters".to_string()

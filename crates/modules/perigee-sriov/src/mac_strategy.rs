@@ -11,9 +11,7 @@ pub enum MacStrategy {
 impl MacStrategy {
     pub fn from_config(config: &MacStrategyConfig, pf_mac: &MacAddress) -> Self {
         match config {
-            MacStrategyConfig::Sequential => Self::Sequential {
-                base_mac: *pf_mac,
-            },
+            MacStrategyConfig::Sequential => Self::Sequential { base_mac: *pf_mac },
             MacStrategyConfig::Random => Self::Random { seed: None },
             MacStrategyConfig::Custom => Self::Custom(Vec::new()),
         }

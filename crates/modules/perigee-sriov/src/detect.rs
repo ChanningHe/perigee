@@ -63,7 +63,7 @@ pub fn scan_physical_functions() -> Result<Vec<PhysicalFunction>> {
 /// Find a PF by its MAC address (stable identifier).
 pub fn find_pf_by_mac(mac: &MacAddress) -> Result<PhysicalFunction> {
     let iface = sysfs::find_iface_by_mac(&mac.to_string())?;
-    build_pf_info(&iface).map_err(Into::into)
+    build_pf_info(&iface)
 }
 
 fn build_pf_info(iface: &str) -> Result<PhysicalFunction> {

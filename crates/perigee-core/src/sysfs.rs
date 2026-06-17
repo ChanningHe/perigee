@@ -15,8 +15,14 @@ pub fn read_sysfs_value(path: &Path) -> Result<String> {
 }
 
 pub fn write_sysfs_value(path: &Path, value: &str) -> Result<()> {
-    fs::write(path, value)
-        .map_err(|e| PerigeeError::Sysfs(format!("failed to write {} to {}: {}", value, path.display(), e)))
+    fs::write(path, value).map_err(|e| {
+        PerigeeError::Sysfs(format!(
+            "failed to write {} to {}: {}",
+            value,
+            path.display(),
+            e
+        ))
+    })
 }
 
 pub fn list_net_interfaces() -> Result<Vec<String>> {
@@ -80,8 +86,9 @@ pub fn read_device_id(iface: &str) -> Result<String> {
 
 pub fn read_driver_name(iface: &str) -> Result<String> {
     let link = net_device_path(iface).join("device/driver");
-    let target = fs::read_link(&link)
-        .map_err(|e| PerigeeError::Sysfs(format!("failed to read driver link for {}: {}", iface, e)))?;
+    let target = fs::read_link(&link).map_err(|e| {
+        PerigeeError::Sysfs(format!("failed to read driver link for {}: {}", iface, e))
+    })?;
     target
         .file_name()
         .and_then(|n| n.to_str())

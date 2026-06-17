@@ -8,7 +8,7 @@ use ratatui::{
     Frame,
 };
 
-use super::{AffinityState, AffinityScreen, AffinityUiAction};
+use super::{AffinityScreen, AffinityState, AffinityUiAction};
 use crate::affinity::cpus_to_ccd_names;
 use crate::pve;
 
@@ -32,11 +32,12 @@ pub fn render_apply(frame: &mut Frame, daemon_online: bool, state: &AffinityStat
     let opt = state.selected_option.as_ref();
     let mut plan_lines = vec![Line::from("")];
     if let Some(opt) = opt {
-        let smt_hint = if state.include_smt && state.topology.as_ref().map(|t| t.has_smt).unwrap_or(false) {
-            format!(" ({} vCPUs with SMT)", state.cores_needed * 2)
-        } else {
-            String::new()
-        };
+        let smt_hint =
+            if state.include_smt && state.topology.as_ref().map(|t| t.has_smt).unwrap_or(false) {
+                format!(" ({} vCPUs with SMT)", state.cores_needed * 2)
+            } else {
+                String::new()
+            };
         plan_lines.push(Line::from(vec![
             Span::styled("  Strategy:   ", common::style_label()),
             Span::styled(opt.name.clone(), common::style_value()),
@@ -340,10 +341,7 @@ pub fn render_auto_apply(frame: &mut Frame, daemon_online: bool, state: &Affinit
             lines.push(Line::from(vec![
                 Span::styled(format!("  {:<6}", vmid), common::style_value()),
                 Span::styled(format!("{:<16}", name_display), common::style_value()),
-                Span::styled(
-                    format!("{:>5}  ", opt.cpus.len()),
-                    common::style_value(),
-                ),
+                Span::styled(format!("{:>5}  ", opt.cpus.len()), common::style_value()),
                 Span::styled(
                     format!("{:<24} ", opt.affinity_str),
                     Style::default().fg(common::BRAND),
@@ -412,11 +410,7 @@ pub fn render_auto_apply(frame: &mut Frame, daemon_online: bool, state: &Affinit
     let hints = if state.auto_executed {
         vec![("Esc", "Done")]
     } else {
-        vec![
-            ("Enter", "Apply All"),
-            ("d", "Dry Run"),
-            ("Esc", "Cancel"),
-        ]
+        vec![("Enter", "Apply All"), ("d", "Dry Run"), ("Esc", "Cancel")]
     };
     common::footer_bar(frame, chunks[3], &hints);
 }
@@ -444,10 +438,9 @@ fn execute_auto_apply(state: &mut AffinityState, dry_run: bool) {
     state.auto_results.clear();
     for (vmid, _, opt) in &state.auto_plan {
         let result = pve::set_affinity(*vmid, &opt.affinity_str, dry_run);
-        state.auto_results.push((
-            *vmid,
-            result.map_err(|e| e.to_string()),
-        ));
+        state
+            .auto_results
+            .push((*vmid, result.map_err(|e| e.to_string())));
     }
     state.auto_executed = true;
 }

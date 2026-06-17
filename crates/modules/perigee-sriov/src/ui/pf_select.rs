@@ -16,8 +16,7 @@ pub fn render(frame: &mut Frame, sriov: &SriovState, area: Rect) {
         .constraints([Constraint::Length(3), Constraint::Min(0)])
         .split(area);
 
-    let is_editing_name = sriov.edit_focus
-        == Some(super::EditFocus::ProfileName);
+    let is_editing_name = sriov.edit_focus == Some(super::EditFocus::ProfileName);
 
     let name_style = if is_editing_name {
         common::style_editing()
@@ -29,7 +28,10 @@ pub fn render(frame: &mut Frame, sriov: &SriovState, area: Rect) {
         Line::from(vec![
             Span::styled("  Profile Name: ", common::style_label()),
             Span::styled("[", common::style_muted()),
-            Span::styled("type a name or select PF below", Style::default().fg(common::TEXT_MUTED)),
+            Span::styled(
+                "type a name or select PF below",
+                Style::default().fg(common::TEXT_MUTED),
+            ),
             Span::styled("]", common::style_muted()),
         ])
     } else {
@@ -46,8 +48,7 @@ pub fn render(frame: &mut Frame, sriov: &SriovState, area: Rect) {
         ])
     };
 
-    let name_block = Paragraph::new(name_display)
-    .block(
+    let name_block = Paragraph::new(name_display).block(
         Block::default()
             .borders(Borders::BOTTOM)
             .border_style(Style::default().fg(common::BORDER)),
@@ -105,12 +106,7 @@ pub fn render(frame: &mut Frame, sriov: &SriovState, area: Rect) {
             lines.push(Line::from(Span::styled(
                 format!(
                     "{}{:<14} {:<14} {:<20} {:<12} {:>7}",
-                    prefix,
-                    pf.iface_name,
-                    pf.pci_address,
-                    pf.mac_address,
-                    pf.vendor,
-                    vf_str,
+                    prefix, pf.iface_name, pf.pci_address, pf.mac_address, pf.vendor, vf_str,
                 ),
                 style,
             )));
@@ -137,13 +133,11 @@ pub fn render(frame: &mut Frame, sriov: &SriovState, area: Rect) {
                             .map(|s| format!("  Speed: {}Mb/s", s))
                             .unwrap_or_default()
                     ),
-                    Style::default().fg(
-                        if pf.link_state == crate::detect::LinkState::Up {
-                            common::SUCCESS
-                        } else {
-                            common::WARN
-                        },
-                    ),
+                    Style::default().fg(if pf.link_state == crate::detect::LinkState::Up {
+                        common::SUCCESS
+                    } else {
+                        common::WARN
+                    }),
                 ),
             ]));
         }
@@ -181,15 +175,14 @@ pub fn handle_input(sriov: &mut SriovState, key: KeyEvent) {
                 if let Some(ref mut profile) = sriov.editing_profile {
                     profile.mac = mac;
                 } else {
-                    sriov.editing_profile =
-                        Some(crate::config::SriovProfileConfig {
-                            mac,
-                            num_vfs: pf.max_vfs.min(16),
-                            mac_strategy: crate::config::MacStrategyConfig::Sequential,
-                            defaults: crate::config::VfDefaults::default(),
-                            vf: Vec::new(),
-                            fdb: crate::config::FdbConfig::default(),
-                        });
+                    sriov.editing_profile = Some(crate::config::SriovProfileConfig {
+                        mac,
+                        num_vfs: pf.max_vfs.min(16),
+                        mac_strategy: crate::config::MacStrategyConfig::Sequential,
+                        defaults: crate::config::VfDefaults::default(),
+                        vf: Vec::new(),
+                        fdb: crate::config::FdbConfig::default(),
+                    });
                 }
                 if sriov.editing_name.is_empty() {
                     sriov.editing_name = pf.iface_name.clone();

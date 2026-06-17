@@ -65,6 +65,12 @@ pub struct AffinityState {
     pub data_ready: bool,
 }
 
+impl Default for AffinityState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AffinityState {
     pub fn new() -> Self {
         Self {
@@ -206,10 +212,7 @@ impl AffinityState {
             if let Some(ref aff) = cfg.affinity {
                 let cpus = affinity::parse_affinity_str(aff);
                 if !cpus.is_empty() {
-                    bindings.push(VmBinding {
-                        vmid: *vmid,
-                        cpus,
-                    });
+                    bindings.push(VmBinding { vmid: *vmid, cpus });
                 }
             }
         }
@@ -253,7 +256,7 @@ impl AffinityState {
             }
             vm_entries.push((vm.vmid, vm.name.clone(), cores));
         }
-        vm_entries.sort_by(|a, b| b.2.cmp(&a.2));
+        vm_entries.sort_by_key(|e| std::cmp::Reverse(e.2));
 
         let mut current_bindings: Vec<VmBinding> = Vec::new();
 
@@ -277,8 +280,7 @@ impl AffinityState {
                     vmid: *vmid,
                     cpus: opt.cpus.clone(),
                 });
-                self.auto_plan
-                    .push((*vmid, name.clone(), opt.clone()));
+                self.auto_plan.push((*vmid, name.clone(), opt.clone()));
             }
         }
     }
@@ -286,11 +288,7 @@ impl AffinityState {
 
 // ── Render / input dispatch (called from perigee-cli) ──
 
-pub fn render_topology(
-    frame: &mut ratatui::Frame,
-    daemon_online: bool,
-    state: &mut AffinityState,
-) {
+pub fn render_topology(frame: &mut ratatui::Frame, daemon_online: bool, state: &mut AffinityState) {
     topology_view::render(frame, daemon_online, state);
 }
 
@@ -298,11 +296,7 @@ pub fn handle_topology_input(state: &mut AffinityState, key: KeyEvent) -> Affini
     topology_view::handle_input(state, key)
 }
 
-pub fn render_strategy(
-    frame: &mut ratatui::Frame,
-    daemon_online: bool,
-    state: &AffinityState,
-) {
+pub fn render_strategy(frame: &mut ratatui::Frame, daemon_online: bool, state: &AffinityState) {
     strategy::render(frame, daemon_online, state);
 }
 
@@ -310,11 +304,7 @@ pub fn handle_strategy_input(state: &mut AffinityState, key: KeyEvent) -> Affini
     strategy::handle_input(state, key)
 }
 
-pub fn render_apply(
-    frame: &mut ratatui::Frame,
-    daemon_online: bool,
-    state: &AffinityState,
-) {
+pub fn render_apply(frame: &mut ratatui::Frame, daemon_online: bool, state: &AffinityState) {
     apply::render_apply(frame, daemon_online, state);
 }
 
@@ -322,11 +312,7 @@ pub fn handle_apply_input(state: &mut AffinityState, key: KeyEvent) -> AffinityU
     apply::handle_apply_input(state, key)
 }
 
-pub fn render_auto_apply(
-    frame: &mut ratatui::Frame,
-    daemon_online: bool,
-    state: &AffinityState,
-) {
+pub fn render_auto_apply(frame: &mut ratatui::Frame, daemon_online: bool, state: &AffinityState) {
     apply::render_auto_apply(frame, daemon_online, state);
 }
 

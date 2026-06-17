@@ -10,7 +10,7 @@ pub fn affinity_config_path() -> PathBuf {
     PathBuf::from("/etc/perigee").join(CONFIG_FILENAME)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AffinityFileConfig {
     #[serde(default)]
     pub affinity: AffinityConfig,
@@ -34,22 +34,13 @@ pub struct AffinityConfig {
     pub auto_apply: AutoApplyConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AutoApplyConfig {
     #[serde(default)]
     pub enabled: bool,
 
     #[serde(default)]
     pub exclude_vmids: Vec<u32>,
-}
-
-impl Default for AutoApplyConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            exclude_vmids: Vec::new(),
-        }
-    }
 }
 
 impl Default for AffinityConfig {
@@ -64,20 +55,11 @@ impl Default for AffinityConfig {
     }
 }
 
-impl Default for AffinityFileConfig {
-    fn default() -> Self {
-        Self {
-            affinity: AffinityConfig::default(),
-        }
-    }
-}
-
 impl AffinityFileConfig {
     pub fn load(path: &std::path::Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        toml::from_str(&content)
-            .with_context(|| format!("parsing {}", path.display()))
+        let content =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        toml::from_str(&content).with_context(|| format!("parsing {}", path.display()))
     }
 
     pub fn save(&self, path: &std::path::Path) -> Result<()> {

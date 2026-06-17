@@ -141,10 +141,7 @@ fn copy_binary(src: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            BINARY_INSTALL_PATH,
-            std::fs::Permissions::from_mode(0o755),
-        )?;
+        std::fs::set_permissions(BINARY_INSTALL_PATH, std::fs::Permissions::from_mode(0o755))?;
     }
     println!("Installed binary to {}", BINARY_INSTALL_PATH);
     Ok(())
