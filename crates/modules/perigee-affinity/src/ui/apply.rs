@@ -265,7 +265,7 @@ fn do_apply(state: &mut AffinityState, dry_run: bool) {
 
 // ── Auto Apply All ──
 
-pub fn render_auto_apply(frame: &mut Frame, daemon_online: bool, state: &AffinityState) {
+pub fn render_auto_apply(frame: &mut Frame, daemon_online: bool, state: &mut AffinityState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -398,7 +398,13 @@ pub fn render_auto_apply(frame: &mut Frame, daemon_online: bool, state: &Affinit
         }
     }
 
-    let content = Paragraph::new(lines).block(
+    // Clamp scroll to content height (borders take 2 rows) so the allocation
+    // and results stay reachable on hosts with many VMs.
+    let viewport = chunks[2].height.saturating_sub(2);
+    let max_scroll = (lines.len() as u16).saturating_sub(viewport);
+    state.auto_scroll = state.auto_scroll.min(max_scroll);
+
+    let content = Paragraph::new(lines).scroll((state.auto_scroll, 0)).block(
         Block::default()
             .title(Span::styled(
                 " Allocation ",
@@ -422,7 +428,17 @@ pub fn handle_auto_apply_input(state: &mut AffinityState, key: KeyEvent) -> Affi
         KeyCode::Esc | KeyCode::Char('q') => {
             state.auto_executed = false;
             state.auto_results.clear();
+            state.auto_scroll = 0;
             AffinityUiAction::NavigateTo(AffinityScreen::Topology)
+        }
+        KeyCode::Up => {
+            state.auto_scroll = state.auto_scroll.saturating_sub(1);
+            AffinityUiAction::None
+        }
+        KeyCode::Down => {
+            // Upper bound is clamped in render against the viewport height.
+            state.auto_scroll = state.auto_scroll.saturating_add(1);
+            AffinityUiAction::None
         }
         KeyCode::Enter if !state.auto_executed => {
             execute_auto_apply(state, false);

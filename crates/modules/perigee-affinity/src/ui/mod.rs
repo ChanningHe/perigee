@@ -58,6 +58,9 @@ pub struct AffinityState {
     pub auto_plan: Vec<(u32, String, AffinityOption)>,
     pub auto_results: Vec<(u32, Result<(), String>)>,
     pub auto_executed: bool,
+    /// Scroll offset for the auto-apply allocation/results view, which grows
+    /// with the VM count.
+    pub auto_scroll: u16,
     pub apply_result: Option<Result<(), String>>,
 
     pub message: Option<String>,
@@ -103,6 +106,7 @@ impl AffinityState {
             auto_plan: Vec::new(),
             auto_results: Vec::new(),
             auto_executed: false,
+            auto_scroll: 0,
             apply_result: None,
             message: None,
             topo_scroll: 0,
@@ -258,6 +262,7 @@ impl AffinityState {
 
         self.auto_results.clear();
         self.auto_executed = false;
+        self.auto_scroll = 0;
 
         let vm_cores: Vec<(u32, String, usize)> = self
             .vms
@@ -307,7 +312,11 @@ pub fn handle_apply_input(state: &mut AffinityState, key: KeyEvent) -> AffinityU
     apply::handle_apply_input(state, key)
 }
 
-pub fn render_auto_apply(frame: &mut ratatui::Frame, daemon_online: bool, state: &AffinityState) {
+pub fn render_auto_apply(
+    frame: &mut ratatui::Frame,
+    daemon_online: bool,
+    state: &mut AffinityState,
+) {
     apply::render_auto_apply(frame, daemon_online, state);
 }
 
