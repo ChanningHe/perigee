@@ -229,15 +229,17 @@ fn read_cpu_capacity(cpu_id: usize) -> u32 {
 }
 
 fn detect_core_type(capacity: u32, siblings: &[usize]) -> CoreType {
-    if capacity >= 1000 {
+    // Any reported capacity classifies the core: P-cores report the highest
+    // value (~1024), E-cores lower. Treat the whole high band as Performance so
+    // the old 900-999 dead zone no longer falls through to the SMT heuristic.
+    if capacity >= 900 {
         return CoreType::Performance;
     }
-    if capacity > 0 && capacity < 900 {
+    if capacity > 0 {
         return CoreType::Efficiency;
     }
-    // Fallback: if capacity is 0 or in 900-999 range, we can't determine
-    // Intel hybrid heuristic: SMT -> P-core, no SMT -> E-core
-    // This is only applied when we know we're on Intel hybrid (checked later)
+    // Only when capacity is entirely absent do we defer to the SMT heuristic in
+    // group_by_intel_core_type (which is reached only on hybrid-detected hosts).
     let _ = siblings;
     CoreType::Unknown
 }
@@ -626,4 +628,27 @@ fn parse_cpu_list(s: &str) -> Result<Vec<usize>> {
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn core_type_from_capacity() {
+        assert_eq!(detect_core_type(1024, &[0, 1]), CoreType::Performance);
+        // Previously the 900-999 band fell through to Unknown and the SMT
+        // heuristic; now it is classified directly.
+        assert_eq!(detect_core_type(950, &[0]), CoreType::Performance);
+        assert_eq!(detect_core_type(512, &[0]), CoreType::Efficiency);
+        // No capacity reported -> defer to the later heuristic.
+        assert_eq!(detect_core_type(0, &[0, 1]), CoreType::Unknown);
+    }
+
+    #[test]
+    fn parse_cpu_list_rejects_bad_ranges() {
+        assert!(parse_cpu_list("0-3").is_ok());
+        assert!(parse_cpu_list("4-2").is_err());
+        assert!(parse_cpu_list("0-99999").is_err());
+    }
 }
