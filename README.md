@@ -35,17 +35,26 @@ Proxmox VE helper toolkit - multi-module TUI for advanced configuration manageme
 
 ## Installation
 
-Download the latest release binary for your architecture:
+Releases ship a single static binary per architecture (no archive). Download
+the one matching your CPU and make it executable:
 
 ```bash
-curl -L -o perigee.tar.gz \
-  https://github.com/channinghe/perigee/releases/latest/download/perigee-${VERSION}-linux-${ARCH}$-musl.tar.gz
-tar xzf perigee.tar.gz && chmod +x ./perigee
+ARCH=$(uname -m)   # x86_64 or aarch64
+VERSION=$(curl -fsSL https://api.github.com/repos/channinghe/perigee/releases/latest \
+  | grep -oP '"tag_name":\s*"\K[^"]+')
+curl -fL -o perigee \
+  "https://github.com/channinghe/perigee/releases/download/${VERSION}/perigee-${VERSION#v}-linux-${ARCH}-musl"
+chmod +x perigee
 ```
 
-Simply enter the TUI:
+Run the TUI directly:
 ```bash
 ./perigee
+```
+
+To install it system-wide and set up the background daemon (systemd):
+```bash
+sudo ./perigee install
 ```
 
 Or build from source (see [Dev.md](./Dev.md) below).
