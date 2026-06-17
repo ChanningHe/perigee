@@ -136,7 +136,7 @@ async fn main_loop(terminal: &mut DefaultTerminal, state: &mut AppState) -> Resu
             AppScreen::AffinityApply => perigee_affinity::ui::render_apply(
                 frame,
                 state.daemon_online,
-                &state.affinity_state,
+                &mut state.affinity_state,
             ),
             AppScreen::AffinityAutoApply => perigee_affinity::ui::render_auto_apply(
                 frame,

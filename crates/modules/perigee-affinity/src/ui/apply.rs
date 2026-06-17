@@ -14,7 +14,7 @@ use crate::pve;
 
 // ── Single VM Apply ──
 
-pub fn render_apply(frame: &mut Frame, daemon_online: bool, state: &AffinityState) {
+pub fn render_apply(frame: &mut Frame, daemon_online: bool, state: &mut AffinityState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -142,8 +142,6 @@ pub fn render_apply(frame: &mut Frame, daemon_online: bool, state: &AffinityStat
             .borders(Borders::TOP)
             .border_style(Style::default().fg(common::BORDER)),
     );
-    frame.render_widget(list, vm_block[1]);
-
     // Preview / result
     let mut preview_lines = Vec::new();
     if let (Some(opt), Some(idx)) = (opt, state.vm_list_state.selected()) {
@@ -173,6 +171,10 @@ pub fn render_apply(frame: &mut Frame, daemon_online: bool, state: &AffinityStat
             }
         }
     }
+    // Rendered here (after `opt` is no longer borrowed) with the ListState so
+    // the selection scrolls into view on hosts with many VMs.
+    frame.render_stateful_widget(list, vm_block[1], &mut state.vm_list_state);
+
     let preview = Paragraph::new(preview_lines).block(
         Block::default()
             .title(Span::styled(

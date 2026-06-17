@@ -304,7 +304,7 @@ pub fn handle_strategy_input(state: &mut AffinityState, key: KeyEvent) -> Affini
     strategy::handle_input(state, key)
 }
 
-pub fn render_apply(frame: &mut ratatui::Frame, daemon_online: bool, state: &AffinityState) {
+pub fn render_apply(frame: &mut ratatui::Frame, daemon_online: bool, state: &mut AffinityState) {
     apply::render_apply(frame, daemon_online, state);
 }
 
