@@ -257,6 +257,30 @@ struct CcdStats {
     total_assigned: usize,
 }
 
+/// Human-readable CCD load label.
+/// - `unique`: distinct threads in the CCD touched by some VM (occupancy).
+/// - `threads`: physical threads the CCD has.
+/// - `total_assigned`: total vCPU pins landing in the CCD (load).
+///
+/// Occupancy is shown as `unique/threads`. When more vCPUs are pinned than the
+/// CCD has threads, the actual vCPU count and the per-thread oversubscription
+/// (total_assigned / threads) are appended, so the ratio reconciles with the
+/// shown count instead of being an opaque float.
+fn ccd_load_label(unique: usize, threads: usize, total_assigned: usize) -> String {
+    if unique == 0 {
+        return "idle".to_string();
+    }
+    if total_assigned > threads {
+        let ratio = total_assigned as f64 / threads as f64;
+        format!(
+            "{}/{} used · {} vCPUs ({:.1}x ⚠)",
+            unique, threads, total_assigned, ratio
+        )
+    } else {
+        format!("{}/{} used", unique, threads)
+    }
+}
+
 fn compute_ccd_stats(
     bindings: &[crate::affinity::VmBinding],
     core_groups: &[crate::topology::CoreGroup],
@@ -298,25 +322,17 @@ fn build_ccd_line<'a>(
     let filled = (unique * bar_width).checked_div(threads).unwrap_or(0);
     let empty = bar_width - filled;
 
+    // Red means oversubscribed (more vCPUs pinned here than physical threads),
+    // not merely fully occupied — a packed-but-not-overcommitted CCD is healthy.
     let bar_color = if unique == 0 {
         common::SUCCESS
-    } else if unique >= threads {
+    } else if stats.total_assigned > threads {
         common::ERROR
     } else {
         common::BRAND
     };
 
-    let label = if unique == 0 {
-        "idle".to_string()
-    } else {
-        let oversub = if stats.total_assigned > unique {
-            let ratio = stats.total_assigned as f64 / unique as f64;
-            format!("  {:.1}x ⚠", ratio)
-        } else {
-            String::new()
-        };
-        format!("{}/{} used{}", unique, threads, oversub)
-    };
+    let label = ccd_load_label(unique, threads, stats.total_assigned);
 
     let mut spans = vec![Span::styled(
         name_label.to_string(),
@@ -391,5 +407,31 @@ pub fn handle_input(state: &mut AffinityState, key: KeyEvent) -> AffinityUiActio
             AffinityUiAction::None
         }
         _ => AffinityUiAction::None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ccd_load_label;
+
+    #[test]
+    fn idle_ccd() {
+        assert_eq!(ccd_load_label(0, 16, 0), "idle");
+    }
+
+    #[test]
+    fn occupied_not_oversubscribed() {
+        assert_eq!(ccd_load_label(8, 16, 8), "8/16 used");
+        // Fully occupied, one vCPU per thread: healthy, no ratio.
+        assert_eq!(ccd_load_label(16, 16, 16), "16/16 used");
+    }
+
+    #[test]
+    fn oversubscribed_shows_count_and_reconciling_ratio() {
+        // 35 vCPUs on 16 threads -> 2.2x, and 35 is shown so the ratio is not
+        // an opaque float.
+        assert_eq!(ccd_load_label(16, 16, 35), "16/16 used · 35 vCPUs (2.2x ⚠)");
+        // Whole-CCD pinning gives an integer ratio (2 VMs worth).
+        assert_eq!(ccd_load_label(16, 16, 32), "16/16 used · 32 vCPUs (2.0x ⚠)");
     }
 }
