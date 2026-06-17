@@ -57,6 +57,11 @@ To install it system-wide and set up the background daemon (systemd):
 sudo ./perigee install
 ```
 
+Once installed, upgrade in place to the latest release at any time:
+```bash
+sudo perigee update
+```
+
 Or build from source (see [Dev.md](./Dev.md) below).
 
 ## Usage
@@ -78,6 +83,11 @@ perigee affinity generate <cores>  # Generate affinity string
 # Daemon management
 perigee status             # Query status
 perigee reload             # Reload configs
+
+# Lifecycle
+sudo perigee install       # Install binary + systemd service
+sudo perigee update        # Upgrade to the latest GitHub release
+sudo perigee uninstall     # Remove service and binary
 ```
 
 ## Project structure
