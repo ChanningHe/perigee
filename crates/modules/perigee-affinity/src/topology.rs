@@ -459,12 +459,26 @@ fn group_by_ccd(cpus: &[CpuInfo], method: &str) -> Vec<CoreGroup> {
 
     list.sort_by(|a, b| a.package_id.cmp(&b.package_id).then(a.id.cmp(&b.id)));
 
+    // On a multi-socket host, CCD ids restart per package, so a bare "CCD 0"
+    // is ambiguous and dedup-by-name would merge both sockets' CCD 0. Prefix
+    // with the package when there is more than one.
+    let multi_socket = list
+        .iter()
+        .map(|cg| cg.package_id)
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+        > 1;
+
     // Renumber CCD IDs per package
     let mut pkg_count: HashMap<usize, usize> = HashMap::new();
     for cg in &mut list {
         let idx = pkg_count.entry(cg.package_id).or_insert(0);
         cg.id = *idx;
-        cg.name = format!("CCD {}", *idx);
+        cg.name = if multi_socket {
+            format!("P{} CCD{}", cg.package_id, *idx)
+        } else {
+            format!("CCD {}", *idx)
+        };
         *idx += 1;
     }
 
