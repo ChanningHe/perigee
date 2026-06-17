@@ -221,33 +221,52 @@ fn handle_fs_event(
     }
 }
 
-/// Extract MAC addresses from a PVE VM/CT config file.
-fn extract_macs_from_config(path: &Path, _bridge: &str) -> Result<Vec<String>> {
+/// Extract MAC addresses from a PVE VM/CT config file, restricted to NICs on
+/// the given bridge.
+fn extract_macs_from_config(path: &Path, bridge: &str) -> Result<Vec<String>> {
     let content = std::fs::read_to_string(path)?;
+    Ok(parse_macs_for_bridge(&content, bridge))
+}
+
+/// Collect VM MAC addresses from PVE config text, but only for NICs attached to
+/// `bridge`. A PVE net line looks like:
+///   net0: virtio=52:54:00:a1:b2:c3,bridge=vmbr0,...
+/// Injecting a MAC from a NIC on some other bridge into this PF's FDB would be
+/// wrong, so a line's MAC is collected only when its `bridge=` matches.
+fn parse_macs_for_bridge(content: &str, bridge: &str) -> Vec<String> {
     let mut macs = Vec::new();
 
     for line in content.lines() {
         let trimmed = line.trim();
-        // Match lines like: net0: virtio=52:54:00:a1:b2:c3,bridge=vmbr0,...
         if !trimmed.starts_with("net") {
             continue;
         }
-        if let Some(eq_pos) = trimmed.find(':') {
-            let value = &trimmed[eq_pos + 1..].trim();
-            // Extract MAC from "virtio=XX:XX:XX:XX:XX:XX" or "e1000=XX:XX:XX:XX:XX:XX"
-            for part in value.split(',') {
-                let part = part.trim();
-                if let Some(mac_start) = part.find('=') {
-                    let potential_mac = &part[mac_start + 1..];
-                    if is_mac_address(potential_mac) {
-                        macs.push(potential_mac.to_lowercase());
-                    }
+        let Some(colon) = trimmed.find(':') else {
+            continue;
+        };
+        let value = trimmed[colon + 1..].trim();
+
+        let mut line_mac: Option<String> = None;
+        let mut line_bridge: Option<&str> = None;
+        for part in value.split(',') {
+            let part = part.trim();
+            if let Some(br) = part.strip_prefix("bridge=") {
+                line_bridge = Some(br.trim());
+            } else if let Some((_model, mac)) = part.split_once('=') {
+                if is_mac_address(mac) {
+                    line_mac = Some(mac.to_lowercase());
                 }
+            }
+        }
+
+        if let (Some(mac), Some(br)) = (line_mac, line_bridge) {
+            if br == bridge {
+                macs.push(mac);
             }
         }
     }
 
-    Ok(macs)
+    macs
 }
 
 fn is_mac_address(s: &str) -> bool {
@@ -341,4 +360,40 @@ esac
 
     info!(path = %output_path.display(), "hookscript generated");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_macs_for_bridge;
+
+    const CONFIG: &str = "\
+name: testvm
+net0: virtio=52:54:00:AA:BB:CC,bridge=vmbr0,firewall=1
+net1: virtio=52:54:00:11:22:33,bridge=vmbr1
+scsi0: local-lvm:vm-100-disk-0,size=32G
+";
+
+    #[test]
+    fn only_collects_macs_on_the_target_bridge() {
+        // The NIC on vmbr1 must NOT be injected into a PF watching vmbr0.
+        assert_eq!(
+            parse_macs_for_bridge(CONFIG, "vmbr0"),
+            vec!["52:54:00:aa:bb:cc"]
+        );
+        assert_eq!(
+            parse_macs_for_bridge(CONFIG, "vmbr1"),
+            vec!["52:54:00:11:22:33"]
+        );
+    }
+
+    #[test]
+    fn unrelated_bridge_yields_nothing() {
+        assert!(parse_macs_for_bridge(CONFIG, "vmbr9").is_empty());
+    }
+
+    #[test]
+    fn nic_without_bridge_is_skipped() {
+        let cfg = "net0: virtio=52:54:00:de:ad:be\n";
+        assert!(parse_macs_for_bridge(cfg, "vmbr0").is_empty());
+    }
 }
