@@ -1,9 +1,31 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::sync::Arc;
+use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{broadcast, Mutex};
 use tracing::{error, info};
 
 use crate::module::ModuleRegistry;
+
+/// Reload configuration and propagate it to every module. Shared by the IPC
+/// `Reload` request and the SIGHUP handler so the two cannot diverge.
+pub async fn reload_all(
+    registry: &Arc<Mutex<ModuleRegistry>>,
+    config: &Arc<Mutex<toml::Value>>,
+) -> Result<()> {
+    let new_config = crate::config::load_all_configs().context("config load failed")?;
+    {
+        let mut cfg = config.lock().await;
+        *cfg = new_config.clone();
+    }
+    let mut reg = registry.lock().await;
+    for module in reg.all_mut() {
+        module
+            .reload(&new_config)
+            .await
+            .with_context(|| format!("reload failed for {}", module.name()))?;
+    }
+    Ok(())
+}
 
 /// Run boot-time apply for all registered modules.
 /// Locks and unlocks the registry for each module individually
@@ -59,14 +81,33 @@ pub async fn run_daemon(
     boot_apply(&registry).await;
     crate::notify::sd_notify_status("running");
 
-    // Wait for shutdown signal
-    tokio::select! {
-        _ = ipc_handle => {}
-        _ = tokio::signal::ctrl_c() => {
-            info!("received SIGINT, shutting down");
-            let _ = shutdown_tx.send(());
+    // Wait for a terminating signal, reloading in place on SIGHUP. SIGTERM
+    // (systemctl stop) and SIGHUP (systemctl reload via ExecReload) must be
+    // handled explicitly; their default disposition would kill the process and
+    // bypass graceful module shutdown.
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sighup = signal(SignalKind::hangup())?;
+    let mut ipc_handle = ipc_handle;
+    loop {
+        tokio::select! {
+            _ = &mut ipc_handle => break,
+            _ = tokio::signal::ctrl_c() => {
+                info!("received SIGINT, shutting down");
+                break;
+            }
+            _ = sigterm.recv() => {
+                info!("received SIGTERM, shutting down");
+                break;
+            }
+            _ = sighup.recv() => {
+                info!("received SIGHUP, reloading config");
+                if let Err(e) = reload_all(&registry, &config).await {
+                    error!(error = format!("{:#}", e), "config reload failed");
+                }
+            }
         }
     }
+    let _ = shutdown_tx.send(());
 
     // Graceful shutdown
     crate::notify::sd_notify_stopping();

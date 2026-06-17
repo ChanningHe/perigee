@@ -114,22 +114,10 @@ async fn process_request(
                 modules: reg.statuses(),
             })
         }
-        Request::Reload => match crate::config::load_all_configs() {
-            Ok(new_config) => {
-                let mut cfg = config.lock().await;
-                *cfg = new_config.clone();
-                let mut reg = registry.lock().await;
-                for module in reg.all_mut() {
-                    if let Err(e) = module.reload(&new_config).await {
-                        return Response::Error {
-                            message: format!("reload failed for {}: {}", module.name(), e),
-                        };
-                    }
-                }
-                Response::Ok
-            }
+        Request::Reload => match crate::scheduler::reload_all(registry, config).await {
+            Ok(()) => Response::Ok,
             Err(e) => Response::Error {
-                message: format!("config load failed: {}", e),
+                message: format!("{:#}", e),
             },
         },
         Request::ReloadModule { name } => {
