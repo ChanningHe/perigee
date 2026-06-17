@@ -47,19 +47,17 @@ jobs:
       - name: Build
         run: cargo build --target x86_64-unknown-linux-musl --release
 
-      - name: Package
+      - name: Stage binary
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p dist
-          cp target/x86_64-unknown-linux-musl/release/perigee dist/perigee
-          tar -czf "dist/perigee-${VERSION}-linux-x86_64-musl.tar.gz" -C dist perigee
-          rm dist/perigee
+          cp target/x86_64-unknown-linux-musl/release/perigee "dist/perigee-${VERSION}-linux-x86_64-musl"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-x86_64
-          path: dist/*.tar.gz
+          path: dist/perigee-*
 
   build-aarch64:
     name: Build aarch64
@@ -84,19 +82,17 @@ jobs:
       - name: Build
         run: cargo build --target aarch64-unknown-linux-musl --release
 
-      - name: Package
+      - name: Stage binary
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p dist
-          cp target/aarch64-unknown-linux-musl/release/perigee dist/perigee
-          tar -czf "dist/perigee-${VERSION}-linux-aarch64-musl.tar.gz" -C dist perigee
-          rm dist/perigee
+          cp target/aarch64-unknown-linux-musl/release/perigee "dist/perigee-${VERSION}-linux-aarch64-musl"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-aarch64
-          path: dist/*.tar.gz
+          path: dist/perigee-*
 
   release:
     name: Create Release
@@ -138,5 +134,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           body: ${{ steps.changelog.outputs.body }}
-          files: artifacts/*.tar.gz
+          files: artifacts/*
           generate_release_notes: false
