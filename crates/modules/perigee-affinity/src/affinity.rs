@@ -616,6 +616,69 @@ pub fn cpus_to_ccd_names(cpus: &[usize], core_groups: &[CoreGroup]) -> Vec<Strin
     names
 }
 
+/// Build the balanced auto-apply plan: one affinity option per eligible VM,
+/// honouring reserved cores and the VM exclude list. Shared by the daemon's
+/// auto-apply and the TUI preview so the two cannot diverge. `vms` is the full
+/// `(vmid, name, cores)` set; VMs with 0 cores or in `exclude_vmids` are
+/// dropped here, then large VMs are placed first.
+pub fn plan_balanced(
+    topology: &CpuTopology,
+    vms: &[(u32, String, usize)],
+    include_smt: bool,
+    reserve_cores: usize,
+    exclude_vmids: &[u32],
+) -> Vec<(u32, String, AffinityOption)> {
+    let mut entries: Vec<(u32, String, usize)> = vms
+        .iter()
+        .filter(|(vmid, _, cores)| *cores > 0 && !exclude_vmids.contains(vmid))
+        .cloned()
+        .collect();
+    entries.sort_by_key(|e| std::cmp::Reverse(e.2));
+
+    let mut current_bindings: Vec<VmBinding> = Vec::new();
+    // Reserve the first `reserve_cores` physical cores (host headroom) as a
+    // pseudo-binding so VM allocation steers clear of them.
+    if reserve_cores > 0 {
+        let reserved: Vec<usize> = topology
+            .core_groups
+            .iter()
+            .flat_map(|cg| cg.physical_cpus.iter().copied())
+            .take(reserve_cores)
+            .collect();
+        if !reserved.is_empty() {
+            current_bindings.push(VmBinding {
+                vmid: 0,
+                cpus: reserved,
+            });
+        }
+    }
+
+    let mut plan = Vec::new();
+    for (vmid, name, cores) in &entries {
+        let req = AffinityRequest {
+            cores_needed: *cores,
+            include_smt,
+            topology: topology.clone(),
+            existing_bindings: current_bindings.clone(),
+        };
+        let Ok(options) = generate(&req) else {
+            continue;
+        };
+        let option = options
+            .iter()
+            .find(|o| o.strategy == Strategy::Balanced && o.available)
+            .or_else(|| options.iter().find(|o| o.available));
+        if let Some(option) = option {
+            current_bindings.push(VmBinding {
+                vmid: *vmid,
+                cpus: option.cpus.clone(),
+            });
+            plan.push((*vmid, name.clone(), option.clone()));
+        }
+    }
+    plan
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -668,6 +731,48 @@ mod tests {
         assert_eq!(parse_affinity_str("0-3,8"), vec![0, 1, 2, 3, 8]);
         assert_eq!(parse_affinity_str("  4 , 6 "), vec![4, 6]);
         assert_eq!(parse_affinity_str(""), Vec::<usize>::new());
+    }
+
+    fn topo_with_group() -> CpuTopology {
+        let cg = CoreGroup {
+            id: 0,
+            package_id: 0,
+            core_type: crate::topology::CoreType::Unknown,
+            name: "CCD 0".to_string(),
+            l3_cache_id: 0,
+            physical_cpus: vec![0, 2, 4, 6],
+            all_cpus: vec![0, 1, 2, 3, 4, 5, 6, 7],
+        };
+        CpuTopology {
+            architecture: Architecture::Amd,
+            total_cpus: 8,
+            total_cores: 4,
+            has_smt: true,
+            packages: Vec::new(),
+            core_groups: vec![cg],
+            detect_method: "test".to_string(),
+            thread_siblings: HashMap::from([
+                (0, vec![0, 1]),
+                (2, vec![2, 3]),
+                (4, vec![4, 5]),
+                (6, vec![6, 7]),
+            ]),
+        }
+    }
+
+    #[test]
+    fn plan_balanced_drops_excluded_and_zero_core_vms() {
+        let topo = topo_with_group();
+        let vms = vec![
+            (100, "a".to_string(), 2),
+            (101, "b".to_string(), 2),
+            (102, "c".to_string(), 0), // zero cores -> dropped
+        ];
+        let plan = plan_balanced(&topo, &vms, false, 0, &[101]); // 101 excluded
+        let ids: Vec<u32> = plan.iter().map(|(id, _, _)| *id).collect();
+        assert!(!ids.contains(&101), "excluded VM must not be planned");
+        assert!(!ids.contains(&102), "zero-core VM must not be planned");
+        assert!(ids.contains(&100), "eligible VM should be planned");
     }
 
     #[test]

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use perigee_core::ipc::{ModuleState, ModuleStatus};
 use tracing::{error, info, warn};
 
-use crate::affinity::{self, AffinityRequest, Strategy, VmBinding};
+use crate::affinity;
 use crate::config::{AffinityConfig, AffinityFileConfig};
 use crate::pve;
 use crate::topology::{self, CpuTopology};
@@ -58,89 +58,29 @@ impl AffinityModule {
         };
 
         let vms = pve::list_vms()?;
-        let exclude = &self.config.auto_apply.exclude_vmids;
-
-        // Gather VM configs and filter
-        let mut vm_entries: Vec<(u32, String, usize)> = Vec::new();
+        // Collect (vmid, name, cores) for every VM; plan_balanced filters out
+        // excluded / 0-core VMs and reserves host cores, identically to the TUI
+        // preview so the two never disagree.
+        let mut vm_cores: Vec<(u32, String, usize)> = Vec::new();
         for vm in &vms {
-            if exclude.contains(&vm.vmid) {
-                continue;
-            }
             let cfg = pve::read_vm_config(vm.vmid).unwrap_or_default();
-            if cfg.cores == 0 {
-                continue;
-            }
-            vm_entries.push((vm.vmid, vm.name.clone(), cfg.cores));
+            vm_cores.push((vm.vmid, vm.name.clone(), cfg.cores));
         }
 
-        // Sort by cores descending (allocate large VMs first)
-        vm_entries.sort_by_key(|e| std::cmp::Reverse(e.2));
+        let plan = affinity::plan_balanced(
+            &topo,
+            &vm_cores,
+            self.config.include_smt,
+            self.config.reserve_cores,
+            &self.config.auto_apply.exclude_vmids,
+        );
 
-        // Build reserved cores set
-        let reserve = self.config.reserve_cores;
-        let mut reserved_cpus: Vec<usize> = Vec::new();
-        if reserve > 0 {
-            let mut count = 0;
-            for cg in &topo.core_groups {
-                for &cpu in &cg.physical_cpus {
-                    if count >= reserve {
-                        break;
-                    }
-                    reserved_cpus.push(cpu);
-                    count += 1;
-                }
-                if count >= reserve {
-                    break;
-                }
-            }
-        }
-
-        // Iteratively assign using balanced strategy
-        let mut current_bindings: Vec<VmBinding> = Vec::new();
-
-        // Include reserved cores as a pseudo-binding
-        if !reserved_cpus.is_empty() {
-            current_bindings.push(VmBinding {
-                vmid: 0,
-                cpus: reserved_cpus,
-            });
-        }
-
+        let total = plan.len();
         let mut applied = 0;
-        for (vmid, name, cores) in &vm_entries {
-            let req = AffinityRequest {
-                cores_needed: *cores,
-                include_smt: self.config.include_smt,
-                topology: topo.clone(),
-                existing_bindings: current_bindings.clone(),
-            };
-
-            let options = match affinity::generate(&req) {
-                Ok(opts) => opts,
-                Err(e) => {
-                    warn!(vmid, name, "failed to generate affinity: {}", e);
-                    continue;
-                }
-            };
-
-            // Pick balanced strategy
-            let option = options
-                .iter()
-                .find(|o| o.strategy == Strategy::Balanced && o.available)
-                .or_else(|| options.iter().find(|o| o.available));
-
-            let Some(option) = option else {
-                warn!(vmid, name, "no available strategy");
-                continue;
-            };
-
+        for (vmid, name, option) in &plan {
             match pve::set_affinity(*vmid, &option.affinity_str, false) {
                 Ok(()) => {
                     info!(vmid, name, affinity = %option.affinity_str, "applied CPU affinity");
-                    current_bindings.push(VmBinding {
-                        vmid: *vmid,
-                        cpus: option.cpus.clone(),
-                    });
                     applied += 1;
                 }
                 Err(e) => {
@@ -150,7 +90,7 @@ impl AffinityModule {
         }
 
         self.applied_count = applied;
-        info!(applied, total = vm_entries.len(), "auto-apply complete");
+        info!(applied, total, "auto-apply complete");
         Ok(())
     }
 }

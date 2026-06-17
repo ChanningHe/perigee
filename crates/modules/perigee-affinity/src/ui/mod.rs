@@ -50,6 +50,11 @@ pub struct AffinityState {
 
     pub selected_option: Option<AffinityOption>,
 
+    // Auto-apply config mirrored from /etc/perigee/affinity.toml so the preview
+    // matches what the daemon would actually apply.
+    pub reserve_cores: usize,
+    pub exclude_vmids: Vec<u32>,
+
     pub auto_plan: Vec<(u32, String, AffinityOption)>,
     pub auto_results: Vec<(u32, Result<(), String>)>,
     pub auto_executed: bool,
@@ -73,6 +78,11 @@ impl Default for AffinityState {
 
 impl AffinityState {
     pub fn new() -> Self {
+        // Mirror the daemon's config so the auto-apply preview agrees with it.
+        // Missing/unreadable config falls back to defaults.
+        let cfg = crate::config::AffinityFileConfig::load(&crate::config::affinity_config_path())
+            .map(|f| f.affinity)
+            .unwrap_or_default();
         Self {
             topology: None,
             topo_error: None,
@@ -81,13 +91,15 @@ impl AffinityState {
             vm_list_state: ListState::default(),
             cores_input: "4".to_string(),
             cores_needed: 4,
-            include_smt: true,
+            include_smt: cfg.include_smt,
             editing_cores: false,
             strategies: Vec::new(),
             strategy_cursor: 0,
             manual_mode: false,
             ccd_selected: Vec::new(),
             selected_option: None,
+            reserve_cores: cfg.reserve_cores,
+            exclude_vmids: cfg.auto_apply.exclude_vmids,
             auto_plan: Vec::new(),
             auto_results: Vec::new(),
             auto_executed: false,
@@ -244,45 +256,28 @@ impl AffinityState {
     pub fn generate_auto_plan(&mut self) {
         let Some(topo) = &self.topology else { return };
 
-        self.auto_plan.clear();
         self.auto_results.clear();
         self.auto_executed = false;
 
-        let mut vm_entries: Vec<(u32, String, usize)> = Vec::new();
-        for vm in &self.vms {
-            let cores = self.vm_configs.get(&vm.vmid).map(|c| c.cores).unwrap_or(0);
-            if cores == 0 {
-                continue;
-            }
-            vm_entries.push((vm.vmid, vm.name.clone(), cores));
-        }
-        vm_entries.sort_by_key(|e| std::cmp::Reverse(e.2));
+        let vm_cores: Vec<(u32, String, usize)> = self
+            .vms
+            .iter()
+            .map(|vm| {
+                let cores = self.vm_configs.get(&vm.vmid).map(|c| c.cores).unwrap_or(0);
+                (vm.vmid, vm.name.clone(), cores)
+            })
+            .collect();
 
-        let mut current_bindings: Vec<VmBinding> = Vec::new();
-
-        for (vmid, name, cores) in &vm_entries {
-            let req = AffinityRequest {
-                cores_needed: *cores,
-                include_smt: self.include_smt,
-                topology: topo.clone(),
-                existing_bindings: current_bindings.clone(),
-            };
-            let Ok(options) = affinity::generate(&req) else {
-                continue;
-            };
-            let option = options
-                .iter()
-                .find(|o| o.strategy == affinity::Strategy::Balanced && o.available)
-                .or_else(|| options.iter().find(|o| o.available));
-
-            if let Some(opt) = option {
-                current_bindings.push(VmBinding {
-                    vmid: *vmid,
-                    cpus: opt.cpus.clone(),
-                });
-                self.auto_plan.push((*vmid, name.clone(), opt.clone()));
-            }
-        }
+        // Same planner the daemon uses, so the preview reflects reserved cores
+        // and the exclude list rather than a different allocation.
+        let plan = affinity::plan_balanced(
+            topo,
+            &vm_cores,
+            self.include_smt,
+            self.reserve_cores,
+            &self.exclude_vmids,
+        );
+        self.auto_plan = plan;
     }
 }
 
