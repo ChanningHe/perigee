@@ -6,6 +6,12 @@ use std::path::{Path, PathBuf};
 const SYSFS_BASE: &str = "/sys/devices/system/cpu";
 const DEFAULT_CORES_PER_CCD: usize = 8;
 
+/// Upper bound on a CPU index when parsing CPU/affinity lists. Guards against a
+/// malformed or hostile range (e.g. `0-4294967295` from a hand-edited config)
+/// expanding to billions of entries and exhausting memory. Comfortably above
+/// the kernel's CONFIG_NR_CPUS ceiling (8192).
+pub const MAX_LOGICAL_CPUS: usize = 8192;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Architecture {
@@ -595,6 +601,9 @@ fn parse_cpu_list(s: &str) -> Result<Vec<usize>> {
         if let Some((start, end)) = part.split_once('-') {
             let start: usize = start.trim().parse()?;
             let end: usize = end.trim().parse()?;
+            if start > end || end >= MAX_LOGICAL_CPUS {
+                bail!("invalid CPU range {}-{}", start, end);
+            }
             for i in start..=end {
                 result.push(i);
             }

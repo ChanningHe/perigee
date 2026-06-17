@@ -1,4 +1,4 @@
-use crate::topology::{Architecture, CoreGroup, CpuTopology};
+use crate::topology::{Architecture, CoreGroup, CpuTopology, MAX_LOGICAL_CPUS};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -585,8 +585,12 @@ pub fn parse_affinity_str(s: &str) -> Vec<usize> {
         }
         if let Some((a, b)) = part.split_once('-') {
             if let (Ok(start), Ok(end)) = (a.trim().parse::<usize>(), b.trim().parse::<usize>()) {
-                for i in start..=end {
-                    result.push(i);
+                // Skip inverted or absurdly large ranges so a malformed affinity
+                // string can't expand to billions of entries and exhaust memory.
+                if start <= end && end < MAX_LOGICAL_CPUS {
+                    for i in start..=end {
+                        result.push(i);
+                    }
                 }
             }
         } else if let Ok(v) = part.parse::<usize>() {
@@ -657,5 +661,21 @@ mod tests {
     fn unknown_physical_core_falls_back_to_itself() {
         let topo = amd_smt_topo();
         assert_eq!(expand_to_vcpus(&[6, 99], true, &topo), vec![6, 7, 99]);
+    }
+
+    #[test]
+    fn parse_affinity_str_handles_ranges_and_values() {
+        assert_eq!(parse_affinity_str("0-3,8"), vec![0, 1, 2, 3, 8]);
+        assert_eq!(parse_affinity_str("  4 , 6 "), vec![4, 6]);
+        assert_eq!(parse_affinity_str(""), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn parse_affinity_str_rejects_oversized_and_inverted_ranges() {
+        // Would otherwise allocate billions of entries / be nonsensical.
+        assert_eq!(parse_affinity_str("0-4294967295"), Vec::<usize>::new());
+        assert_eq!(parse_affinity_str("8-4"), Vec::<usize>::new());
+        // A valid range alongside a bad one keeps the valid part.
+        assert_eq!(parse_affinity_str("0-1,0-99999999"), vec![0, 1]);
     }
 }
