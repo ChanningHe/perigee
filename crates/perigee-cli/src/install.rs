@@ -193,13 +193,32 @@ pub fn update(force: bool) -> Result<()> {
     println!("Downloading {} ...", asset);
     curl_download(&url, &tmp).with_context(|| format!("failed to download {}", url))?;
 
+    // Verify the published SHA-256 before trusting (or executing) the binary.
+    let sums = curl_capture(&["-fsSL", "-A", "perigee-updater", &format!("{}.sha256", url)])
+        .context("failed to download checksum (.sha256)")?;
+    let expected = sums
+        .split_whitespace()
+        .next()
+        .context("empty checksum file")?
+        .to_lowercase();
+    let actual = sha256_hex(&tmp)?;
+    if actual != expected {
+        let _ = std::fs::remove_file(&tmp);
+        bail!(
+            "checksum mismatch (expected {}, got {}); aborting update",
+            expected,
+            actual
+        );
+    }
+    println!("Checksum verified.");
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
     }
 
-    // Sanity-check the download before swapping it in.
+    // Sanity-check that the verified binary actually runs on this host.
     let runs = Command::new(&tmp)
         .arg("--version")
         .output()
@@ -243,6 +262,13 @@ fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
     let b = it.next()?.parse().ok()?;
     let c = it.next()?.parse().ok()?;
     Some((a, b, c))
+}
+
+fn sha256_hex(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let digest = Sha256::digest(&bytes);
+    Ok(digest.iter().map(|b| format!("{:02x}", b)).collect())
 }
 
 fn curl_capture(args: &[&str]) -> Result<String> {
@@ -370,5 +396,17 @@ mod tests {
         // A non-semver tag still allows an update when it differs.
         assert!(is_newer("0.1.0", "nightly"));
         assert!(!is_newer("nightly", "nightly"));
+    }
+
+    #[test]
+    fn sha256_matches_known_vector() {
+        let path = std::env::temp_dir().join("perigee_sha256_test.bin");
+        std::fs::write(&path, b"hello").unwrap();
+        let hex = sha256_hex(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            hex,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
     }
 }
