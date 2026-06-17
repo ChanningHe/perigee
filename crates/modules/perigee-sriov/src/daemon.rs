@@ -158,16 +158,18 @@ impl SriovModule {
                 }
             };
 
-            let mgr = FdbManager::new(FdbMode::DaemonWatch, pf_iface.clone(), Some(bridge.clone()));
+            let mgr = FdbManager::new(FdbMode::DaemonWatch, pf_iface, Some(bridge));
 
             if let Err(e) = mgr.full_sync() {
                 warn!(profile = %name, error = %e, "FDB initial sync failed");
             }
 
+            // The watcher shares the manager's entry map (Arc), so live adds and
+            // removes are reflected in managed_count() reported via fdb_managers.
+            let watcher = mgr.clone();
             self.fdb_managers.push(mgr);
 
             let shutdown_rx = shutdown_tx.subscribe();
-            let watcher = FdbManager::new(FdbMode::DaemonWatch, pf_iface, Some(bridge));
             tokio::spawn(async move {
                 if let Err(e) = watcher.start_watcher(shutdown_rx).await {
                     error!(error = %e, "FDB watcher error");
@@ -357,6 +359,11 @@ impl Module for SriovModule {
 
     async fn shutdown(&self) -> Result<()> {
         info!("SR-IOV module shutting down");
+        // Signal the FDB watcher tasks to exit their select loop and release the
+        // inotify watches. Without this they leak until the process dies.
+        if let Some(tx) = &self.shutdown_tx {
+            let _ = tx.send(());
+        }
         Ok(())
     }
 

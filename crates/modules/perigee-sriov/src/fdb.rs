@@ -21,7 +21,12 @@ pub struct FdbEntry {
 }
 
 /// FDB manager state shared across watcher tasks.
-#[derive(Debug)]
+///
+/// `Clone` is intentional and shallow on `entries`: the `Arc<Mutex<..>>` is
+/// shared, so a cloned manager observes and mutates the SAME entry set. This
+/// lets the synchronous full-sync handle and the spawned watcher task track one
+/// map instead of diverging copies.
+#[derive(Debug, Clone)]
 pub struct FdbManager {
     pub mode: FdbMode,
     pub pf_dev: String,
