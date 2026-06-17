@@ -199,5 +199,13 @@ async fn process_request(
                 Response::Events(Vec::new())
             }
         }
+        Request::FdbEntries { profile } => {
+            let reg = registry.lock().await;
+            if let Some(module) = reg.get("sriov") {
+                Response::FdbEntries(module.fdb_entries(&profile))
+            } else {
+                Response::FdbEntries(Vec::new())
+            }
+        }
     }
 }

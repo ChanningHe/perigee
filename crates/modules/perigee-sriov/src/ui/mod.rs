@@ -7,7 +7,7 @@ pub mod vf_config;
 use crate::config::{sriov_config_path, SriovFileConfig, SriovProfileConfig};
 use crate::detect::PhysicalFunction;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use perigee_core::ipc::{ProfileDetailStatus, ProfileState, Request, Response};
+use perigee_core::ipc::{FdbEntryInfo, ProfileDetailStatus, ProfileState, Request, Response};
 use perigee_tui as common;
 use ratatui::{
     layout::{Constraint, Direction, Layout},
@@ -24,6 +24,7 @@ use std::collections::{BTreeMap, HashMap};
 pub enum SriovScreen {
     Profiles,
     Status(usize),
+    FdbDetail(usize),
     Editor(usize),
     NewEditor,
 }
@@ -113,6 +114,9 @@ pub struct SriovState {
     pub status_scroll: u16,
     /// Scroll offset for the editor's TOML preview, long with many VF overrides.
     pub review_scroll: u16,
+    /// FDB entries fetched for the FDB detail sub-page, with its scroll offset.
+    pub fdb_entries: Vec<FdbEntryInfo>,
+    pub fdb_scroll: u16,
 }
 
 impl Default for SriovState {
@@ -145,6 +149,8 @@ impl SriovState {
             status_error: None,
             status_scroll: 0,
             review_scroll: 0,
+            fdb_entries: Vec::new(),
+            fdb_scroll: 0,
         }
     }
 
@@ -644,6 +650,7 @@ pub fn render_status(
         &[
             ("↑↓", "Scroll"),
             ("e", "Edit"),
+            ("f", "FDB"),
             ("R", "Refresh"),
             ("a", "Apply"),
             ("Esc", "Back"),
@@ -662,6 +669,10 @@ pub async fn handle_status_input(
             sriov.status_error = None;
             sriov.status_scroll = 0;
             return SriovUiAction::NavigateTo(SriovScreen::Profiles);
+        }
+        KeyCode::Char('f') => {
+            fetch_fdb_entries(sriov, profile_idx).await;
+            return SriovUiAction::NavigateTo(SriovScreen::FdbDetail(profile_idx));
         }
         KeyCode::Up => {
             sriov.status_scroll = sriov.status_scroll.saturating_sub(1);
@@ -744,6 +755,126 @@ async fn fetch_profile_status(sriov: &mut SriovState, profile_idx: usize) {
         } else {
             sriov.status_error = Some("Daemon is not running".to_string());
         }
+    }
+}
+
+// ── FDB detail sub-page ──
+
+async fn fetch_fdb_entries(sriov: &mut SriovState, profile_idx: usize) {
+    sriov.fdb_entries.clear();
+    sriov.fdb_scroll = 0;
+    let Some((name, _)) = sriov.profiles.get(profile_idx) else {
+        return;
+    };
+    let profile_name = name.clone();
+    if !perigee_core::client::IpcClient::is_daemon_running() {
+        return;
+    }
+    if let Ok(Response::FdbEntries(entries)) =
+        perigee_core::client::IpcClient::send(&Request::FdbEntries {
+            profile: profile_name,
+        })
+        .await
+    {
+        sriov.fdb_entries = entries;
+    }
+}
+
+pub fn render_fdb_detail(
+    frame: &mut Frame,
+    daemon_online: bool,
+    sriov: &mut SriovState,
+    profile_idx: usize,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
+        .split(frame.area());
+
+    let profile_name = sriov
+        .profiles
+        .get(profile_idx)
+        .map(|(n, _)| n.clone())
+        .unwrap_or_else(|| "?".to_string());
+
+    common::header_bar(
+        frame,
+        chunks[0],
+        &format!("SR-IOV > {} > FDB", profile_name),
+        daemon_online,
+    );
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!("  {} managed FDB entries", sriov.fdb_entries.len()),
+        common::style_muted(),
+    )));
+    lines.push(Line::from(""));
+
+    if sriov.fdb_entries.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No entries (daemon offline, FDB disabled, or no VMs on the watched bridge).",
+            common::style_muted(),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            format!("  {:<8}  {:<20}  {}", "VM", "MAC", "Bridge"),
+            common::style_muted(),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("  {}", "─".repeat(46)),
+            Style::default().fg(common::BORDER),
+        )));
+        for e in &sriov.fdb_entries {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {:<8}  ", e.vmid), common::style_value()),
+                Span::styled(
+                    format!("{:<20}  ", e.mac),
+                    Style::default().fg(common::TEXT),
+                ),
+                Span::styled(e.bridge.clone(), common::style_muted()),
+            ]));
+        }
+    }
+
+    // Clamp scroll to content (borders take 2 rows).
+    let viewport = chunks[1].height.saturating_sub(2);
+    let max_scroll = (lines.len() as u16).saturating_sub(viewport);
+    sriov.fdb_scroll = sriov.fdb_scroll.min(max_scroll);
+
+    let para = Paragraph::new(lines).scroll((sriov.fdb_scroll, 0)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(common::BORDER)),
+    );
+    frame.render_widget(para, chunks[1]);
+
+    common::footer_bar(frame, chunks[2], &[("↑↓", "Scroll"), ("Esc", "Back")]);
+}
+
+pub fn handle_fdb_detail_input(
+    sriov: &mut SriovState,
+    key: KeyEvent,
+    profile_idx: usize,
+) -> SriovUiAction {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('f') => {
+            sriov.fdb_scroll = 0;
+            SriovUiAction::NavigateTo(SriovScreen::Status(profile_idx))
+        }
+        KeyCode::Up => {
+            sriov.fdb_scroll = sriov.fdb_scroll.saturating_sub(1);
+            SriovUiAction::None
+        }
+        KeyCode::Down => {
+            sriov.fdb_scroll = sriov.fdb_scroll.saturating_add(1);
+            SriovUiAction::None
+        }
+        _ => SriovUiAction::None,
     }
 }
 

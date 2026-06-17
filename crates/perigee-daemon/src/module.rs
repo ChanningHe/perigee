@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use perigee_core::ipc::{ModuleStatus, ProfileDetailStatus, ProfileEvent};
+use perigee_core::ipc::{FdbEntryInfo, ModuleStatus, ProfileDetailStatus, ProfileEvent};
 use std::collections::HashMap;
 
 #[async_trait]
@@ -15,6 +15,9 @@ pub trait Module: Send + Sync {
         None
     }
     fn profile_events(&self, _profile: &str, _limit: usize) -> Vec<ProfileEvent> {
+        Vec::new()
+    }
+    fn fdb_entries(&self, _profile: &str) -> Vec<FdbEntryInfo> {
         Vec::new()
     }
     fn retry_profile(&mut self, _profile: &str) -> anyhow::Result<()> {

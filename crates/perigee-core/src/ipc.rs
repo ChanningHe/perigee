@@ -12,6 +12,7 @@ pub enum Request {
     Status,
     ProfileStatus { profile: String },
     ProfileEvents { profile: String, limit: usize },
+    FdbEntries { profile: String },
     Apply { profile: String },
     RetryFailed { profile: String },
 }
@@ -24,6 +25,7 @@ pub enum Response {
     Status(DaemonStatus),
     ProfileDetail(ProfileDetailStatus),
     Events(Vec<ProfileEvent>),
+    FdbEntries(Vec<FdbEntryInfo>),
     Error { message: String },
 }
 
@@ -117,6 +119,15 @@ pub struct VfSnapshot {
     pub spoofchk: bool,
     pub vlan_id: Option<u16>,
     pub vlan_qos: Option<u8>,
+}
+
+/// A single managed FDB entry: a VM MAC the daemon injected into the PF's FDB,
+/// along with the VM it came from and the bridge it is attached to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FdbEntryInfo {
+    pub mac: String,
+    pub vmid: String,
+    pub bridge: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

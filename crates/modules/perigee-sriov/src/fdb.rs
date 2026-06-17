@@ -54,6 +54,13 @@ impl FdbManager {
         self.entries.lock().unwrap().len() as u32
     }
 
+    /// Snapshot of all managed entries, sorted by VM then MAC for stable display.
+    pub fn entries_snapshot(&self) -> Vec<FdbEntry> {
+        let mut list: Vec<FdbEntry> = self.entries.lock().unwrap().values().cloned().collect();
+        list.sort_by(|a, b| a.vmid.cmp(&b.vmid).then(a.mac.cmp(&b.mac)));
+        list
+    }
+
     /// Perform initial full sync by scanning all PVE config files.
     pub fn full_sync(&self) -> Result<()> {
         if self.mode == FdbMode::Disabled {

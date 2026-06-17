@@ -11,6 +11,7 @@ pub enum AppScreen {
     Home,
     SriovProfiles,
     SriovStatus(usize),
+    SriovFdbDetail(usize),
     SriovEditor(usize),
     SriovNewEditor,
     AffinityTopology,
@@ -111,6 +112,12 @@ async fn main_loop(terminal: &mut DefaultTerminal, state: &mut AppState) -> Resu
                 &mut state.sriov_state,
                 idx,
             ),
+            AppScreen::SriovFdbDetail(idx) => perigee_sriov::ui::render_fdb_detail(
+                frame,
+                state.daemon_online,
+                &mut state.sriov_state,
+                idx,
+            ),
             AppScreen::SriovEditor(idx) => perigee_sriov::ui::render_editor(
                 frame,
                 state.daemon_online,
@@ -165,6 +172,14 @@ async fn main_loop(terminal: &mut DefaultTerminal, state: &mut AppState) -> Resu
                             idx,
                         )
                         .await;
+                        apply_sriov_action(state, action);
+                    }
+                    AppScreen::SriovFdbDetail(idx) => {
+                        let action = perigee_sriov::ui::handle_fdb_detail_input(
+                            &mut state.sriov_state,
+                            key,
+                            idx,
+                        );
                         apply_sriov_action(state, action);
                     }
                     AppScreen::SriovEditor(idx) => {
@@ -249,6 +264,7 @@ fn apply_sriov_action(state: &mut AppState, action: perigee_sriov::ui::SriovUiAc
             state.screen = match screen {
                 SriovScreen::Profiles => AppScreen::SriovProfiles,
                 SriovScreen::Status(i) => AppScreen::SriovStatus(i),
+                SriovScreen::FdbDetail(i) => AppScreen::SriovFdbDetail(i),
                 SriovScreen::Editor(i) => AppScreen::SriovEditor(i),
                 SriovScreen::NewEditor => AppScreen::SriovNewEditor,
             };

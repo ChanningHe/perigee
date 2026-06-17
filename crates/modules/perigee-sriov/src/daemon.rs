@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use perigee_core::error::PerigeeError;
 use perigee_core::ipc::{
-    EventLevel, FdbRuntimeStatus, ModuleState, ModuleStatus, ProfileDetailStatus, ProfileEvent,
-    ProfileState, ProfileSummary, VfRuntimeStatus, VfSnapshot,
+    EventLevel, FdbEntryInfo, FdbRuntimeStatus, ModuleState, ModuleStatus, ProfileDetailStatus,
+    ProfileEvent, ProfileState, ProfileSummary, VfRuntimeStatus, VfSnapshot,
 };
 use std::collections::BTreeMap;
 use tokio::sync::broadcast;
@@ -220,6 +220,31 @@ impl SriovModule {
         })
     }
 
+    pub fn get_fdb_entries(&self, profile_name: &str) -> Vec<FdbEntryInfo> {
+        let Some(rt) = self.profiles.get(profile_name) else {
+            return Vec::new();
+        };
+        let Some(pf_iface) =
+            perigee_core::sysfs::find_iface_by_mac(&rt.config.mac.to_string()).ok()
+        else {
+            return Vec::new();
+        };
+        self.fdb_managers
+            .iter()
+            .find(|m| m.pf_dev == pf_iface)
+            .map(|m| {
+                m.entries_snapshot()
+                    .into_iter()
+                    .map(|e| FdbEntryInfo {
+                        mac: e.mac,
+                        vmid: e.vmid,
+                        bridge: e.bridge,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn get_profile_events(&self, profile_name: &str, limit: usize) -> Vec<ProfileEvent> {
         self.profiles
             .get(profile_name)
@@ -373,6 +398,10 @@ impl Module for SriovModule {
 
     fn profile_events(&self, profile: &str, limit: usize) -> Vec<ProfileEvent> {
         self.get_profile_events(profile, limit)
+    }
+
+    fn fdb_entries(&self, profile: &str) -> Vec<FdbEntryInfo> {
+        self.get_fdb_entries(profile)
     }
 
     fn retry_profile(&mut self, profile: &str) -> Result<()> {
