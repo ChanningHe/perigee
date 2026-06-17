@@ -557,7 +557,7 @@ pub fn render_status(
             lines.push(section_hdr("── VF Status ──"));
             lines.push(Line::from(Span::styled(
                 format!(
-                    "  {:>4}  {:<18} {:<6} {:<8} {:<8} {}",
+                    "  {:>4}  {:<26} {:<6} {:<8} {:<8} {}",
                     "VF#", "MAC", "Trust", "Spoof", "VLAN", "Status"
                 ),
                 common::style_muted(),
@@ -571,12 +571,24 @@ pub fn render_status(
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "-".to_string());
 
+                // For auto-assigned MACs the configured value is the "(auto)"
+                // sentinel; show the live MAC read back from the VF so the
+                // operator can see what was actually assigned.
+                let mac_display = if vf.configured.mac == "(auto)" {
+                    match vf.actual.as_ref() {
+                        Some(a) if !a.mac.is_empty() => format!("{} (auto)", a.mac),
+                        _ => "(auto)".to_string(),
+                    }
+                } else {
+                    vf.configured.mac.clone()
+                };
+
                 lines.push(Line::from(vec![
                     Span::styled(
                         format!(
-                            "  {:>4}  {:<18} {:<6} {:<8} {:<8} ",
+                            "  {:>4}  {:<26} {:<6} {:<8} {:<8} ",
                             vf.index,
-                            &vf.configured.mac,
+                            mac_display,
                             if vf.configured.trust { "✓" } else { "✗" },
                             if vf.configured.spoofchk { "✓" } else { "✗" },
                             vlan_str,
