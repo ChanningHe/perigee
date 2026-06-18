@@ -212,11 +212,14 @@ pub fn render_vf_table(frame: &mut Frame, sriov: &SriovState, area: Rect) {
 
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
-        "   VF#  MAC               Trust  SpoofChk  VLAN   Override",
+        format!(
+            "   {:>3}  {:<14} {:<18} {:<6} {:<9} {:<6} {}",
+            "VF#", "PCI Addr", "MAC", "Trust", "SpoofChk", "VLAN", "Override"
+        ),
         common::style_muted(),
     )));
     lines.push(Line::from(Span::styled(
-        format!("   {}", "─".repeat(60)),
+        format!("   {}", "─".repeat(72)),
         Style::default().fg(common::BORDER),
     )));
 
@@ -225,6 +228,10 @@ pub fn render_vf_table(frame: &mut Frame, sriov: &SriovState, area: Rect) {
         let cursor = sriov.vf_table_cursor;
         let scroll = sriov.vf_table_scroll;
         let visible_end = (scroll + VF_TABLE_VISIBLE_ROWS).min(num);
+
+        // VFs only have a PCI address once created/applied; before that (and if
+        // the PF can't be located) every row shows "-".
+        let pf_iface = perigee_core::sysfs::find_iface_by_mac(&profile.mac.to_string()).ok();
 
         for i in scroll..visible_end {
             let is_selected = i == cursor;
@@ -237,6 +244,10 @@ pub fn render_vf_table(frame: &mut Frame, sriov: &SriovState, area: Rect) {
             let spoof_val = vf_override
                 .and_then(|o| o.spoofchk)
                 .unwrap_or(profile.defaults.spoofchk);
+            let pci_str = pf_iface
+                .as_deref()
+                .and_then(|pf| perigee_core::sysfs::read_vf_pci_addr(pf, i as u32))
+                .unwrap_or_else(|| "-".to_string());
             // Preview the MAC each VF will get from the selected strategy so the
             // operator sees it before applying. Sequential is deterministic
             // (PF MAC + index); Random is assigned at apply time; Custom is not
@@ -281,9 +292,10 @@ pub fn render_vf_table(frame: &mut Frame, sriov: &SriovState, area: Rect) {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(
-                        "{}{:>3}  {:<18} {:<6} {:<9} {:<6}",
+                        "{}{:>3}  {:<14} {:<18} {:<6} {:<9} {:<6}",
                         indicator,
                         i,
+                        pci_str,
                         mac_str,
                         if trust_val { "✓" } else { "✗" },
                         if spoof_val { "✓" } else { "✗" },
