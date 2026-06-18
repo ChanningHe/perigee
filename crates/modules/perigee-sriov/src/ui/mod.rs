@@ -7,7 +7,9 @@ pub mod vf_config;
 use crate::config::{sriov_config_path, SriovFileConfig, SriovProfileConfig};
 use crate::detect::PhysicalFunction;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use perigee_core::ipc::{FdbEntryInfo, ProfileDetailStatus, ProfileState, Request, Response};
+use perigee_core::ipc::{
+    FdbEntryInfo, ProfileDetailStatus, ProfileState, Request, Response, VfUser,
+};
 use perigee_tui as common;
 use ratatui::{
     layout::{Constraint, Direction, Layout},
@@ -117,6 +119,10 @@ pub struct SriovState {
     /// FDB entries fetched for the FDB detail sub-page, with its scroll offset.
     pub fdb_entries: Vec<FdbEntryInfo>,
     pub fdb_scroll: u16,
+    /// VF→VM usage map and resolved PF iface, cached on editor open so the VF
+    /// Table renderer never scans /etc/pve or all of /sys/class/net per frame.
+    pub vf_users: HashMap<String, VfUser>,
+    pub editor_pf_iface: Option<String>,
 }
 
 impl Default for SriovState {
@@ -151,6 +157,8 @@ impl SriovState {
             review_scroll: 0,
             fdb_entries: Vec::new(),
             fdb_scroll: 0,
+            vf_users: HashMap::new(),
+            editor_pf_iface: None,
         }
     }
 
@@ -206,6 +214,17 @@ impl SriovState {
         self.fdb_cursor = 0;
         self.edit_focus = None;
         self.review_scroll = 0;
+        self.refresh_vf_usage();
+    }
+
+    /// Resolve the PF interface and scan VM passthrough usage once, on editor
+    /// open. Keeps the VF Table render path free of per-frame filesystem I/O.
+    pub fn refresh_vf_usage(&mut self) {
+        self.editor_pf_iface = self
+            .editing_profile
+            .as_ref()
+            .and_then(|p| perigee_core::sysfs::find_iface_by_mac(&p.mac.to_string()).ok());
+        self.vf_users = crate::vm_usage::scan_vf_users();
     }
 
     pub fn sync_vf_count_buf(&mut self) {

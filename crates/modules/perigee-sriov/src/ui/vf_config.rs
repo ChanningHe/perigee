@@ -229,11 +229,12 @@ pub fn render_vf_table(frame: &mut Frame, sriov: &SriovState, area: Rect) {
         let scroll = sriov.vf_table_scroll;
         let visible_end = (scroll + VF_TABLE_VISIBLE_ROWS).min(num);
 
-        // VFs only have a PCI address once created/applied; before that (and if
-        // the PF can't be located) every row shows "-".
-        let pf_iface = perigee_core::sysfs::find_iface_by_mac(&profile.mac.to_string()).ok();
-        // Which VM passes each VF through (scanned once per render).
-        let vf_users = crate::vm_usage::scan_vf_users();
+        // PF iface + VM usage are cached on editor open (see refresh_vf_usage)
+        // so this render path does no per-frame filesystem scanning. VFs only
+        // have a PCI address once created/applied; before that (and if the PF
+        // can't be located) every row shows "-".
+        let pf_iface = sriov.editor_pf_iface.as_deref();
+        let vf_users = &sriov.vf_users;
 
         for i in scroll..visible_end {
             let is_selected = i == cursor;
@@ -246,9 +247,7 @@ pub fn render_vf_table(frame: &mut Frame, sriov: &SriovState, area: Rect) {
             let spoof_val = vf_override
                 .and_then(|o| o.spoofchk)
                 .unwrap_or(profile.defaults.spoofchk);
-            let pci = pf_iface
-                .as_deref()
-                .and_then(|pf| perigee_core::sysfs::read_vf_pci_addr(pf, i as u32));
+            let pci = pf_iface.and_then(|pf| perigee_core::sysfs::read_vf_pci_addr(pf, i as u32));
             let pci_str = pci.as_deref().unwrap_or("-").to_string();
             // "Used By" colored span: green if the referencing VM is running.
             let (used_text, used_color) = match pci
