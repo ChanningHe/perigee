@@ -563,8 +563,8 @@ pub fn render_status(
             lines.push(section_hdr("── VF Status ──"));
             lines.push(Line::from(Span::styled(
                 format!(
-                    "  {:>4}  {:<26} {:<6} {:<8} {:<8} {}",
-                    "VF#", "MAC", "Trust", "Spoof", "VLAN", "Status"
+                    "  {:>4}  {:<14} {:<26} {:<6} {:<8} {:<8} {}",
+                    "VF#", "PCI Addr", "MAC", "Trust", "Spoof", "VLAN", "Status"
                 ),
                 common::style_muted(),
             )));
@@ -576,6 +576,10 @@ pub fn render_status(
                     .vlan_id
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "-".to_string());
+
+                // PCI address PVE uses to pass the VF through; VF# alone doesn't
+                // map to what shows up in the PVE hardware list.
+                let pci_str = vf.pci_addr.as_deref().unwrap_or("-");
 
                 // For auto-assigned MACs the configured value is the "(auto)"
                 // sentinel; show the live MAC read back from the VF so the
@@ -592,8 +596,9 @@ pub fn render_status(
                 lines.push(Line::from(vec![
                     Span::styled(
                         format!(
-                            "  {:>4}  {:<26} {:<6} {:<8} {:<8} ",
+                            "  {:>4}  {:<14} {:<26} {:<6} {:<8} {:<8} ",
                             vf.index,
+                            pci_str,
                             mac_display,
                             if vf.configured.trust { "✓" } else { "✗" },
                             if vf.configured.spoofchk { "✓" } else { "✗" },

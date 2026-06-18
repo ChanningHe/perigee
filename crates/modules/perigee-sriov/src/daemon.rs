@@ -503,8 +503,11 @@ fn build_vf_status(config: &SriovProfileConfig, pf_iface: Option<&str>) -> Vec<V
             false
         };
 
+        let pci_addr = pf_iface.and_then(|pf| perigee_core::sysfs::read_vf_pci_addr(pf, i));
+
         vfs.push(VfRuntimeStatus {
             index: i,
+            pci_addr,
             configured,
             actual,
             matches,

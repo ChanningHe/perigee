@@ -106,6 +106,8 @@ pub struct ProfileDetailStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VfRuntimeStatus {
     pub index: u32,
+    /// PCI address (BDF) PVE uses to pass the VF through, e.g. "0000:41:00.1".
+    pub pci_addr: Option<String>,
     pub configured: VfSnapshot,
     pub actual: Option<VfSnapshot>,
     pub matches: bool,

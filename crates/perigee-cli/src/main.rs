@@ -134,9 +134,11 @@ async fn handle_sriov_cli(action: SriovAction) -> Result<()> {
                                 .vlan_id
                                 .map(|id| id.to_string())
                                 .unwrap_or_else(|| "-".into());
+                            let pci = vf.pci_addr.as_deref().unwrap_or("-");
                             println!(
-                                "  VF#{:<3} {} trust={:<5} spoofchk={:<5} vlan={:<6} {}",
+                                "  VF#{:<3} {:<14} {} trust={:<5} spoofchk={:<5} vlan={:<6} {}",
                                 vf.index,
+                                pci,
                                 vf.configured.mac,
                                 vf.configured.trust,
                                 vf.configured.spoofchk,

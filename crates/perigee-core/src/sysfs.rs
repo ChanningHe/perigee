@@ -84,6 +84,15 @@ pub fn read_device_id(iface: &str) -> Result<String> {
     read_sysfs_value(&path)
 }
 
+/// PCI address (BDF, e.g. "0000:41:00.1") of VF `vf_index` on `iface`, read from
+/// the `device/virtfn<N>` symlink. This is the address PVE uses to pass a VF
+/// through to a guest. None if it cannot be resolved.
+pub fn read_vf_pci_addr(iface: &str, vf_index: u32) -> Option<String> {
+    let link = net_device_path(iface).join(format!("device/virtfn{}", vf_index));
+    let target = fs::read_link(&link).ok()?;
+    target.file_name().map(|n| n.to_string_lossy().to_string())
+}
+
 pub fn read_driver_name(iface: &str) -> Result<String> {
     let link = net_device_path(iface).join("device/driver");
     let target = fs::read_link(&link).map_err(|e| {
