@@ -213,13 +213,13 @@ pub fn render_vf_table(frame: &mut Frame, sriov: &SriovState, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
         format!(
-            "   {:>3}  {:<14} {:<18} {:<6} {:<9} {:<6} {}",
-            "VF#", "PCI Addr", "MAC", "Trust", "SpoofChk", "VLAN", "Override"
+            "   {:>3}  {:<14} {:<18} {:<6} {:<9} {:<6} {:<10} {}",
+            "VF#", "PCI Addr", "MAC", "Trust", "SpoofChk", "VLAN", "Used By", "Override"
         ),
         common::style_muted(),
     )));
     lines.push(Line::from(Span::styled(
-        format!("   {}", "─".repeat(72)),
+        format!("   {}", "─".repeat(84)),
         Style::default().fg(common::BORDER),
     )));
 
@@ -232,6 +232,8 @@ pub fn render_vf_table(frame: &mut Frame, sriov: &SriovState, area: Rect) {
         // VFs only have a PCI address once created/applied; before that (and if
         // the PF can't be located) every row shows "-".
         let pf_iface = perigee_core::sysfs::find_iface_by_mac(&profile.mac.to_string()).ok();
+        // Which VM passes each VF through (scanned once per render).
+        let vf_users = crate::vm_usage::scan_vf_users();
 
         for i in scroll..visible_end {
             let is_selected = i == cursor;
@@ -244,10 +246,19 @@ pub fn render_vf_table(frame: &mut Frame, sriov: &SriovState, area: Rect) {
             let spoof_val = vf_override
                 .and_then(|o| o.spoofchk)
                 .unwrap_or(profile.defaults.spoofchk);
-            let pci_str = pf_iface
+            let pci = pf_iface
                 .as_deref()
-                .and_then(|pf| perigee_core::sysfs::read_vf_pci_addr(pf, i as u32))
-                .unwrap_or_else(|| "-".to_string());
+                .and_then(|pf| perigee_core::sysfs::read_vf_pci_addr(pf, i as u32));
+            let pci_str = pci.as_deref().unwrap_or("-").to_string();
+            // "Used By" colored span: green if the referencing VM is running.
+            let (used_text, used_color) = match pci
+                .as_deref()
+                .and_then(|p| vf_users.get(&crate::vm_usage::normalize_pci(p)))
+            {
+                Some(u) if u.running => (format!("VM {}", u.vmid), common::SUCCESS),
+                Some(u) => (format!("VM {}", u.vmid), common::TEXT_MUTED),
+                None => ("-".to_string(), common::TEXT_MUTED),
+            };
             // Preview the MAC each VF will get from the selected strategy so the
             // operator sees it before applying. Sequential is deterministic
             // (PF MAC + index); Random is assigned at apply time; Custom is not
@@ -292,7 +303,7 @@ pub fn render_vf_table(frame: &mut Frame, sriov: &SriovState, area: Rect) {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(
-                        "{}{:>3}  {:<14} {:<18} {:<6} {:<9} {:<6}",
+                        "{}{:>3}  {:<14} {:<18} {:<6} {:<9} {:<6} ",
                         indicator,
                         i,
                         pci_str,
@@ -302,6 +313,10 @@ pub fn render_vf_table(frame: &mut Frame, sriov: &SriovState, area: Rect) {
                         vlan_str,
                     ),
                     style,
+                ),
+                Span::styled(
+                    format!("{:<10}", used_text),
+                    Style::default().fg(used_color),
                 ),
                 override_mark,
             ]));

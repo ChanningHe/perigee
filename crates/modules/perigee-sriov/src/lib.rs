@@ -6,6 +6,7 @@ pub mod mac_strategy;
 pub mod ui;
 pub mod vendor;
 pub mod vf;
+pub mod vm_usage;
 
 pub fn module_info() -> (&'static str, &'static str) {
     ("SR-IOV", "Configure SR-IOV virtual functions")

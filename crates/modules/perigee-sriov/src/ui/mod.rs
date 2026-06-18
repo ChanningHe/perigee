@@ -563,8 +563,8 @@ pub fn render_status(
             lines.push(section_hdr("── VF Status ──"));
             lines.push(Line::from(Span::styled(
                 format!(
-                    "  {:>4}  {:<14} {:<26} {:<6} {:<8} {:<8} {}",
-                    "VF#", "PCI Addr", "MAC", "Trust", "Spoof", "VLAN", "Status"
+                    "  {:>4}  {:<14} {:<26} {:<6} {:<8} {:<8} {:<10} {}",
+                    "VF#", "PCI Addr", "MAC", "Trust", "Spoof", "VLAN", "Status", "Used By"
                 ),
                 common::style_muted(),
             )));
@@ -593,6 +593,14 @@ pub fn render_status(
                     vf.configured.mac.clone()
                 };
 
+                // "Used By" is a colored span: green when the referencing VM is
+                // running, muted when stopped, and "-" when no VM uses the VF.
+                let (used_text, used_color) = match &vf.used_by {
+                    Some(u) if u.running => (format!("VM {}", u.vmid), common::SUCCESS),
+                    Some(u) => (format!("VM {}", u.vmid), common::TEXT_MUTED),
+                    None => ("-".to_string(), common::TEXT_MUTED),
+                };
+
                 lines.push(Line::from(vec![
                     Span::styled(
                         format!(
@@ -607,9 +615,10 @@ pub fn render_status(
                         Style::default().fg(common::TEXT_DIM),
                     ),
                     Span::styled(
-                        if ok { "OK" } else { "MISMATCH" },
+                        format!("{:<10}", if ok { "OK" } else { "MISMATCH" }),
                         Style::default().fg(if ok { common::SUCCESS } else { common::ERROR }),
                     ),
+                    Span::styled(used_text, Style::default().fg(used_color)),
                 ]));
             }
         }

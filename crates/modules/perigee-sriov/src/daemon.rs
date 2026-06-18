@@ -454,6 +454,9 @@ fn build_vf_status(config: &SriovProfileConfig, pf_iface: Option<&str>) -> Vec<V
         .and_then(|pf| vf::read_actual_vf_states(pf).ok())
         .unwrap_or_default();
 
+    // Which VM (if any) passes each VF through, and whether it is running.
+    let vf_users = crate::vm_usage::scan_vf_users();
+
     let mut vfs = Vec::new();
     for i in 0..config.num_vfs {
         let vf_override = config.vf.iter().find(|o| o.index == i);
@@ -504,10 +507,14 @@ fn build_vf_status(config: &SriovProfileConfig, pf_iface: Option<&str>) -> Vec<V
         };
 
         let pci_addr = pf_iface.and_then(|pf| perigee_core::sysfs::read_vf_pci_addr(pf, i));
+        let used_by = pci_addr
+            .as_deref()
+            .and_then(|p| vf_users.get(&crate::vm_usage::normalize_pci(p)).cloned());
 
         vfs.push(VfRuntimeStatus {
             index: i,
             pci_addr,
+            used_by,
             configured,
             actual,
             matches,

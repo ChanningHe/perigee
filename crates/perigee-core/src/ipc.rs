@@ -108,10 +108,19 @@ pub struct VfRuntimeStatus {
     pub index: u32,
     /// PCI address (BDF) PVE uses to pass the VF through, e.g. "0000:41:00.1".
     pub pci_addr: Option<String>,
+    /// The VM passing this VF through (via `hostpci`), if any.
+    pub used_by: Option<VfUser>,
     pub configured: VfSnapshot,
     pub actual: Option<VfSnapshot>,
     pub matches: bool,
     pub last_error: Option<String>,
+}
+
+/// A VM that references a VF for PCI passthrough.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VfUser {
+    pub vmid: String,
+    pub running: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

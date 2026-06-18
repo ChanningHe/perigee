@@ -135,15 +135,21 @@ async fn handle_sriov_cli(action: SriovAction) -> Result<()> {
                                 .map(|id| id.to_string())
                                 .unwrap_or_else(|| "-".into());
                             let pci = vf.pci_addr.as_deref().unwrap_or("-");
+                            let used = match &vf.used_by {
+                                Some(u) if u.running => format!("VM {} (running)", u.vmid),
+                                Some(u) => format!("VM {} (stopped)", u.vmid),
+                                None => "-".to_string(),
+                            };
                             println!(
-                                "  VF#{:<3} {:<14} {} trust={:<5} spoofchk={:<5} vlan={:<6} {}",
+                                "  VF#{:<3} {:<14} {} trust={:<5} spoofchk={:<5} vlan={:<6} {:<10} {}",
                                 vf.index,
                                 pci,
                                 vf.configured.mac,
                                 vf.configured.trust,
                                 vf.configured.spoofchk,
                                 vlan_str,
-                                status
+                                status,
+                                used
                             );
                         }
                         if detail.config_dirty {
