@@ -179,7 +179,9 @@ async fn process_request(
         Request::ProfileStatus { profile } => {
             let reg = registry.lock().await;
             if let Some(module) = reg.get("sriov") {
-                match module.profile_detail(&profile) {
+                // profile_detail scans sysfs, /etc/pve and spawns `ip link show`;
+                // keep that blocking work off the async reactor.
+                match tokio::task::block_in_place(|| module.profile_detail(&profile)) {
                     Some(detail) => Response::ProfileDetail(detail),
                     None => Response::Error {
                         message: format!("profile '{}' not found", profile),
