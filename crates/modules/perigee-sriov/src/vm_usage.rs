@@ -37,24 +37,46 @@ pub fn scan_vf_users() -> HashMap<String, VfUser> {
     map
 }
 
-/// A VM is running when its QEMU pid file exists.
+/// A VM is running when its QEMU pid file points at a live process. The pid file
+/// alone can be stale after an unclean shutdown, so the pid is validated against
+/// `/proc`.
 fn vm_is_running(vmid: &str) -> bool {
-    Path::new(&format!("/run/qemu-server/{}.pid", vmid)).exists()
+    let Ok(pid_str) = std::fs::read_to_string(format!("/run/qemu-server/{}.pid", vmid)) else {
+        return false;
+    };
+    let Ok(pid) = pid_str.trim().parse::<u32>() else {
+        return false;
+    };
+    Path::new(&format!("/proc/{}", pid)).exists()
+}
+
+/// True for `hostpci<digits>` keys (hostpci0..hostpci15), not just anything
+/// starting with "hostpci".
+fn is_hostpci_key(key: &str) -> bool {
+    key.strip_prefix("hostpci")
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Extract the raw PCI addresses from a config's `hostpci` lines. A value looks
 /// like `0000:41:00.1,pcie=1` or `0000:41:00.1;0000:41:00.2`; mapping-based
 /// entries (`mapping=foo`) are skipped since they carry no BDF.
+///
+/// Scanning stops at the first `[section]` header: PVE stores VM snapshots in
+/// the same file under `[name]` sections with their own historical `hostpci`
+/// lines, which must NOT be attributed to the live VM.
 fn hostpci_addrs(content: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in content.lines() {
         let line = line.trim();
-        if !line.starts_with("hostpci") {
-            continue;
+        if line.starts_with('[') {
+            break;
         }
-        let Some((_key, value)) = line.split_once(':') else {
+        let Some((key, value)) = line.split_once(':') else {
             continue;
         };
+        if !is_hostpci_key(key.trim()) {
+            continue;
+        }
         let devices = value.trim().split(',').next().unwrap_or("").trim();
         for addr in devices.split(';') {
             let addr = addr.trim();
@@ -88,6 +110,30 @@ hostpci2: mapping=mynic
 ";
         let addrs = hostpci_addrs(cfg);
         assert_eq!(addrs, vec!["0000:41:00.1", "41:00.2"]);
+    }
+
+    #[test]
+    fn ignores_snapshot_sections() {
+        // The live config passes 41:00.1; an old snapshot referenced 41:00.9,
+        // which must NOT be attributed to the live VM.
+        let cfg = "\
+hostpci0: 0000:41:00.1,pcie=1
+[before-upgrade]
+hostpci0: 0000:41:00.9,pcie=1
+runningmachine: pc-i440fx
+";
+        assert_eq!(hostpci_addrs(cfg), vec!["0000:41:00.1"]);
+    }
+
+    #[test]
+    fn rejects_non_hostpci_keys() {
+        // Only hostpci<digits> counts; a stray key starting with "hostpci"
+        // must be ignored.
+        assert!(is_hostpci_key("hostpci0"));
+        assert!(is_hostpci_key("hostpci15"));
+        assert!(!is_hostpci_key("hostpcix"));
+        assert!(!is_hostpci_key("hostpci"));
+        assert!(hostpci_addrs("hostpcixyz: 0000:41:00.1\n").is_empty());
     }
 
     #[test]
