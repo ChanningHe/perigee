@@ -266,33 +266,72 @@ async fn handle_sriov_cli(action: SriovAction) -> Result<()> {
             }
             Ok(())
         }
-        SriovAction::FdbHookscript => {
-            let output = std::path::PathBuf::from("/var/lib/vz/snippets/perigee-bridgefix.sh");
-            // Try to detect PF from existing config
-            let config_path = perigee_sriov::config::sriov_config_path();
-            if config_path.exists() {
-                let config = perigee_sriov::config::SriovFileConfig::load(&config_path)?;
-                if let Some((_name, profile)) = config.sriov.iter().next() {
-                    let pf_mac = profile.mac.to_string();
-                    let pf_iface =
-                        perigee_core::sysfs::find_iface_by_mac(&pf_mac).map_err(|_| {
-                            anyhow::anyhow!(
-                                "Cannot detect PF interface for MAC {}. Is the NIC online?",
-                                pf_mac
-                            )
-                        })?;
-                    perigee_sriov::fdb::generate_hookscript(&output, &pf_iface)?;
-                    println!("Hookscript generated: {}", output.display());
-                    println!(
-                        "Attach to VM: qm set <vmid> --hookscript local:snippets/perigee-bridgefix.sh"
-                    );
-                    return Ok(());
-                }
+        SriovAction::FdbHookscript => generate_fdb_hookscripts(),
+        SriovAction::FdbHook { vmid, phase } => {
+            // Never fail: PVE aborts the guest start on a failing pre-start
+            // hook. Errors still reach the PVE task log via stderr.
+            if let Err(e) = perigee_sriov::fdb::run_hook(&vmid, &phase) {
+                eprintln!("perigee fdb-hook: {e:#}");
             }
-            println!("No SR-IOV profile found. Create one first with 'perigee sriov'.");
             Ok(())
         }
     }
+}
+
+/// Write the FDB hookscript to every `output_path` used by a hookscript-mode
+/// profile (the default path when none is set). The script itself serves all
+/// such profiles, so every copy is identical.
+fn generate_fdb_hookscripts() -> Result<()> {
+    use perigee_sriov::config::{sriov_config_path, FdbMode, SriovFileConfig};
+    use perigee_sriov::fdb::{generate_hookscript, DEFAULT_HOOKSCRIPT_PATH};
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
+
+    let config_path = sriov_config_path();
+    let profiles = if config_path.exists() {
+        SriovFileConfig::load(&config_path)?.sriov
+    } else {
+        Default::default()
+    };
+    let hooked: Vec<_> = profiles
+        .values()
+        .filter(|p| p.fdb.mode == FdbMode::Hookscript)
+        .collect();
+    if hooked.is_empty() {
+        println!(
+            "Note: no profile uses FDB mode 'hookscript'; the hook does nothing until one does."
+        );
+    }
+    let mut paths: BTreeSet<PathBuf> = hooked
+        .iter()
+        .map(|p| {
+            PathBuf::from(
+                p.fdb
+                    .output_path
+                    .as_deref()
+                    .unwrap_or(DEFAULT_HOOKSCRIPT_PATH),
+            )
+        })
+        .collect();
+    if paths.is_empty() {
+        paths.insert(PathBuf::from(DEFAULT_HOOKSCRIPT_PATH));
+    }
+
+    let bin = Path::new(install::BINARY_INSTALL_PATH);
+    if !bin.exists() {
+        eprintln!(
+            "Warning: {} not found; the hook calls it, run 'perigee install' first.",
+            bin.display()
+        );
+    }
+    for path in &paths {
+        generate_hookscript(path, bin)?;
+        println!("Hookscript generated: {}", path.display());
+    }
+    println!(
+        "Attach to a guest: qm set <vmid> --hookscript <storage>:snippets/<file> (pct set for CTs)"
+    );
+    Ok(())
 }
 
 async fn handle_affinity_cli(action: AffinityAction) -> Result<()> {

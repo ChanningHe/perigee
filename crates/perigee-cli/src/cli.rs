@@ -92,6 +92,15 @@ pub enum SriovAction {
 
     /// Generate FDB hookscript (fallback mode)
     FdbHookscript,
+
+    /// PVE hookscript entry point (invoked by the generated hookscript)
+    #[command(hide = true)]
+    FdbHook {
+        /// Guest VMID
+        vmid: String,
+        /// PVE hook phase (pre-start, post-start, pre-stop, post-stop)
+        phase: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

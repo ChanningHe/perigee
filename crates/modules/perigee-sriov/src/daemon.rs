@@ -54,11 +54,7 @@ impl SriovModule {
     fn fdb_targets(&self) -> Vec<FdbTarget> {
         self.profiles
             .values()
-            .map(|rt| FdbTarget {
-                profile: rt.name.clone(),
-                pf_mac: rt.config.mac.to_string(),
-                mode: rt.config.fdb.mode.clone(),
-            })
+            .map(|rt| FdbTarget::new(&rt.name, &rt.config))
             .collect()
     }
 

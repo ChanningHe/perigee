@@ -7,13 +7,17 @@
 //! [`reconcile`]), so missed events, restarts and kernel-side loss all heal on
 //! the next pass.
 
+#[cfg(test)]
+mod fake;
+mod hook;
 mod hookscript;
 mod kernel;
 mod reconcile;
 mod scan;
 mod store;
 
-pub use hookscript::generate_hookscript;
+pub use hook::run_hook;
+pub use hookscript::{generate_hookscript, DEFAULT_HOOKSCRIPT_PATH};
 pub use reconcile::{FdbEntry, FdbStatus, FdbTarget};
 
 use std::collections::BTreeMap;

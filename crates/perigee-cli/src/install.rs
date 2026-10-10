@@ -5,7 +5,7 @@ use std::process::Command;
 
 const SERVICE_NAME: &str = "perigee.service";
 const SERVICE_PATH: &str = "/etc/systemd/system/perigee.service";
-const BINARY_INSTALL_PATH: &str = "/usr/local/bin/perigee";
+pub(crate) const BINARY_INSTALL_PATH: &str = "/usr/local/bin/perigee";
 const REPO: &str = "channinghe/perigee";
 
 const SERVICE_CONTENT: &str = r#"[Unit]

@@ -28,7 +28,7 @@ const FDB_MODES: [FdbModeInfo; 3] = [
     FdbModeInfo {
         mode: FdbMode::Hookscript,
         label: "Hookscript",
-        desc: "Generate hookscript for manual VM attachment.",
+        desc: "Run `perigee sriov fdb-hookscript`, then attach it to guests.",
     },
     FdbModeInfo {
         mode: FdbMode::Disabled,

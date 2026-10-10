@@ -11,7 +11,7 @@ use std::time::Instant;
 use tracing::warn;
 
 use super::scan::GuestNic;
-use crate::config::FdbMode;
+use crate::config::{FdbMode, SriovProfileConfig};
 
 /// Host operations the reconciler depends on.
 pub trait FdbHost {
@@ -43,6 +43,16 @@ pub struct FdbTarget {
     pub profile: String,
     pub pf_mac: String,
     pub mode: FdbMode,
+}
+
+impl FdbTarget {
+    pub fn new(profile: &str, config: &SriovProfileConfig) -> Self {
+        Self {
+            profile: profile.to_string(),
+            pf_mac: config.mac.to_string(),
+            mode: config.fdb.mode.clone(),
+        }
+    }
 }
 
 /// One managed entry and the guest NICs (VM ids, bridges) that need it.
@@ -245,81 +255,7 @@ fn release(host: &impl FdbHost, profile: &str, owned: &Owned) -> Option<Owned> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
-
-    const PF_MAC: &str = "b8:ce:f6:00:00:01";
-    const PF: &str = "enp1s0f0";
-    const BR: &str = "vmbr0";
-
-    /// In-memory host: one PF with a self FDB.
-    struct FakeHost {
-        fdb: RefCell<BTreeSet<String>>,
-        bridges: BTreeSet<String>,
-        pf_online: bool,
-        failing: BTreeSet<String>,
-    }
-
-    impl FakeHost {
-        fn new(present: &[&str]) -> Self {
-            Self {
-                fdb: RefCell::new(present.iter().map(|s| s.to_string()).collect()),
-                bridges: [BR.to_string()].into(),
-                pf_online: true,
-                failing: BTreeSet::new(),
-            }
-        }
-        fn fdb(&self) -> Vec<String> {
-            self.fdb.borrow().iter().cloned().collect()
-        }
-        fn check(&self, mac: &str) -> Result<()> {
-            if self.failing.contains(mac) {
-                anyhow::bail!("injected failure");
-            }
-            Ok(())
-        }
-    }
-
-    impl FdbHost for FakeHost {
-        fn resolve_pf(&self, pf_mac: &str) -> Result<String> {
-            if self.pf_online && pf_mac == PF_MAC {
-                Ok(PF.to_string())
-            } else {
-                anyhow::bail!("no such interface")
-            }
-        }
-        fn bridges_of(&self, _pf_dev: &str) -> BTreeSet<String> {
-            self.bridges.clone()
-        }
-        fn present_macs(&self, _pf_dev: &str) -> Result<BTreeSet<String>> {
-            Ok(self.fdb.borrow().clone())
-        }
-        fn add(&self, mac: &str, _pf_dev: &str) -> Result<()> {
-            self.check(mac)?;
-            self.fdb.borrow_mut().insert(mac.to_string());
-            Ok(())
-        }
-        fn del(&self, mac: &str, _pf_dev: &str) -> Result<()> {
-            self.check(mac)?;
-            self.fdb.borrow_mut().remove(mac);
-            Ok(())
-        }
-    }
-
-    fn target(mode: FdbMode) -> FdbTarget {
-        FdbTarget {
-            profile: "p".to_string(),
-            pf_mac: PF_MAC.to_string(),
-            mode,
-        }
-    }
-
-    fn nic(vmid: &str, mac: &str, bridge: &str) -> GuestNic {
-        GuestNic {
-            vmid: vmid.to_string(),
-            mac: mac.to_string(),
-            bridge: bridge.to_string(),
-        }
-    }
+    use crate::fdb::fake::*;
 
     fn owned(macs: &[&str]) -> OwnedMap {
         OwnedMap::from([(
@@ -331,8 +267,6 @@ mod tests {
         )])
     }
 
-    const A: &str = "52:54:00:00:00:0a";
-    const B: &str = "52:54:00:00:00:0b";
     const FOREIGN: &str = "02:00:00:00:00:ff";
 
     #[test]
