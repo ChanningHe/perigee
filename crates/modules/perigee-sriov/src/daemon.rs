@@ -1,5 +1,5 @@
 use crate::config::{sriov_config_path, FdbMode, SriovFileConfig, SriovProfileConfig};
-use crate::fdb::FdbManager;
+use crate::fdb::{FdbService, FdbStatus, FdbTarget};
 use crate::vf;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -29,7 +29,9 @@ struct ProfileRuntime {
 
 pub struct SriovModule {
     profiles: BTreeMap<String, ProfileRuntime>,
-    fdb_managers: Vec<FdbManager>,
+    fdb: FdbService,
+    /// sriov.toml loaded successfully at least once (gates FDB reconciling).
+    config_loaded: bool,
     shutdown_tx: Option<broadcast::Sender<()>>,
 }
 
@@ -43,23 +45,44 @@ impl SriovModule {
     pub fn new() -> Self {
         Self {
             profiles: BTreeMap::new(),
-            fdb_managers: Vec::new(),
+            fdb: FdbService::new(),
+            config_loaded: false,
             shutdown_tx: None,
         }
     }
 
-    fn load_profiles(_config: &toml::Value) -> BTreeMap<String, SriovProfileConfig> {
+    fn fdb_targets(&self) -> Vec<FdbTarget> {
+        self.profiles
+            .values()
+            .map(|rt| FdbTarget {
+                profile: rt.name.clone(),
+                pf_mac: rt.config.mac.to_string(),
+                mode: rt.config.fdb.mode.clone(),
+            })
+            .collect()
+    }
+
+    /// Push the current profiles to the FDB reconciler, starting it on first
+    /// use. Only called once sriov.toml has loaded: reconciling against an
+    /// empty profile set from a broken config would release every entry.
+    fn sync_fdb(&mut self) {
+        self.fdb.set_targets(self.fdb_targets());
+        if self.shutdown_tx.is_none() {
+            let (tx, _) = broadcast::channel(4);
+            self.fdb.spawn(tx.subscribe());
+            self.shutdown_tx = Some(tx);
+        }
+    }
+
+    /// Read sriov.toml. A missing file means no profiles.
+    fn read_profiles() -> Result<BTreeMap<String, SriovProfileConfig>> {
         let path = sriov_config_path();
         if !path.exists() {
-            return BTreeMap::new();
+            return Ok(BTreeMap::new());
         }
-        match SriovFileConfig::load(&path) {
-            Ok(file_config) => file_config.sriov,
-            Err(e) => {
-                error!(error = %e, "failed to load sriov config");
-                BTreeMap::new()
-            }
-        }
+        SriovFileConfig::load(&path)
+            .map(|file_config| file_config.sriov)
+            .with_context(|| format!("failed to load {}", path.display()))
     }
 
     async fn apply_all_profiles(&mut self) {
@@ -134,79 +157,12 @@ impl SriovModule {
         }
     }
 
-    fn start_fdb_watchers(&mut self, shutdown_tx: &broadcast::Sender<()>) {
-        for (name, rt) in &self.profiles {
-            if rt.config.fdb.mode != FdbMode::DaemonWatch {
-                continue;
-            }
-
-            let pf_iface = match perigee_core::sysfs::find_iface_by_mac(&rt.config.mac.to_string())
-            {
-                Ok(iface) => iface,
-                Err(_) => continue,
-            };
-
-            let bridge = match detect_bridge_for_pf(&pf_iface) {
-                Some(br) => br,
-                None => {
-                    info!(
-                        profile = %name,
-                        pf = %pf_iface,
-                        "FDB DaemonWatch skipped: PF is not a bridge port (add PF to a bridge to enable FDB sync)"
-                    );
-                    continue;
-                }
-            };
-
-            let mgr = FdbManager::new(FdbMode::DaemonWatch, pf_iface, Some(bridge));
-
-            if let Err(e) = mgr.full_sync() {
-                warn!(profile = %name, error = %e, "FDB initial sync failed");
-            }
-
-            // The watcher shares the manager's entry map (Arc), so live adds and
-            // removes are reflected in managed_count() reported via fdb_managers.
-            let watcher = mgr.clone();
-            self.fdb_managers.push(mgr);
-
-            let shutdown_rx = shutdown_tx.subscribe();
-            tokio::spawn(async move {
-                if let Err(e) = watcher.start_watcher(shutdown_rx).await {
-                    error!(error = %e, "FDB watcher error");
-                }
-            });
-        }
-    }
-
     pub fn get_profile_detail(&self, profile_name: &str) -> Option<ProfileDetailStatus> {
         let rt = self.profiles.get(profile_name)?;
         let pf_iface = perigee_core::sysfs::find_iface_by_mac(&rt.config.mac.to_string()).ok();
 
         let vfs = build_vf_status(&rt.config, pf_iface.as_deref());
-
-        let fdb_status = self
-            .fdb_managers
-            .iter()
-            .find(|m| {
-                pf_iface
-                    .as_ref()
-                    .map(|iface| m.pf_dev == *iface)
-                    .unwrap_or(false)
-            })
-            .map(|m| FdbRuntimeStatus {
-                mode: format!("{:?}", m.mode),
-                bridge: m.bridge.clone(),
-                managed_entries: m.managed_count(),
-                last_sync_secs_ago: None,
-                errors: Vec::new(),
-            })
-            .unwrap_or(FdbRuntimeStatus {
-                mode: format!("{:?}", rt.config.fdb.mode),
-                bridge: None,
-                managed_entries: 0,
-                last_sync_secs_ago: None,
-                errors: Vec::new(),
-            });
+        let fdb = fdb_runtime_status(&rt.config.fdb.mode, self.fdb.status(profile_name));
 
         Some(ProfileDetailStatus {
             name: rt.name.clone(),
@@ -216,33 +172,24 @@ impl SriovModule {
             last_applied: rt.last_applied,
             config_dirty: rt.config_dirty,
             vfs,
-            fdb: fdb_status,
+            fdb,
         })
     }
 
     pub fn get_fdb_entries(&self, profile_name: &str) -> Vec<FdbEntryInfo> {
-        let Some(rt) = self.profiles.get(profile_name) else {
+        let Some(status) = self.fdb.status(profile_name) else {
             return Vec::new();
         };
-        let Some(pf_iface) =
-            perigee_core::sysfs::find_iface_by_mac(&rt.config.mac.to_string()).ok()
-        else {
-            return Vec::new();
-        };
-        self.fdb_managers
-            .iter()
-            .find(|m| m.pf_dev == pf_iface)
-            .map(|m| {
-                m.entries_snapshot()
-                    .into_iter()
-                    .map(|e| FdbEntryInfo {
-                        mac: e.mac,
-                        vmid: e.vmid,
-                        bridge: e.bridge,
-                    })
-                    .collect()
+        let bridge = status.bridge.unwrap_or_default();
+        status
+            .entries
+            .into_iter()
+            .map(|e| FdbEntryInfo {
+                mac: e.mac,
+                vmid: e.vmids.into_iter().collect::<Vec<_>>().join(","),
+                bridge: bridge.clone(),
             })
-            .unwrap_or_default()
+            .collect()
     }
 
     pub fn get_profile_events(&self, profile_name: &str, limit: usize) -> Vec<ProfileEvent> {
@@ -317,8 +264,20 @@ impl Module for SriovModule {
         "sriov"
     }
 
-    async fn init(&mut self, config: &toml::Value) -> Result<()> {
-        let profiles = Self::load_profiles(config);
+    async fn init(&mut self, _config: &toml::Value) -> Result<()> {
+        let profiles = match Self::read_profiles() {
+            Ok(p) => {
+                self.config_loaded = true;
+                p
+            }
+            Err(e) => {
+                error!(
+                    error = format!("{e:#}"),
+                    "failed to load sriov config; FDB management paused until a successful reload"
+                );
+                BTreeMap::new()
+            }
+        };
         for (name, cfg) in profiles {
             self.profiles.insert(
                 name.clone(),
@@ -340,16 +299,16 @@ impl Module for SriovModule {
 
     async fn apply(&mut self) -> Result<()> {
         self.apply_all_profiles().await;
-
-        let (tx, _) = broadcast::channel(4);
-        self.shutdown_tx = Some(tx.clone());
-        self.start_fdb_watchers(&tx);
-
+        if self.config_loaded {
+            self.sync_fdb();
+        }
         Ok(())
     }
 
-    async fn reload(&mut self, config: &toml::Value) -> Result<()> {
-        let new_profiles = Self::load_profiles(config);
+    async fn reload(&mut self, _config: &toml::Value) -> Result<()> {
+        // Fail instead of loading an empty set: dropping every profile would
+        // make the FDB reconciler release all entries over a config typo.
+        let new_profiles = Self::read_profiles()?;
 
         self.profiles
             .retain(|name, _| new_profiles.contains_key(name));
@@ -375,6 +334,9 @@ impl Module for SriovModule {
             }
         }
 
+        self.config_loaded = true;
+        self.sync_fdb();
+
         info!(
             profiles = self.profiles.len(),
             "SR-IOV module reloaded config"
@@ -384,8 +346,8 @@ impl Module for SriovModule {
 
     async fn shutdown(&self) -> Result<()> {
         info!("SR-IOV module shutting down");
-        // Signal the FDB watcher tasks to exit their select loop and release the
-        // inotify watches. Without this they leak until the process dies.
+        // Stop the FDB reconciler. Installed entries stay so guests keep
+        // connectivity across a daemon restart.
         if let Some(tx) = &self.shutdown_tx {
             let _ = tx.send(());
         }
@@ -524,11 +486,17 @@ fn build_vf_status(config: &SriovProfileConfig, pf_iface: Option<&str>) -> Vec<V
     vfs
 }
 
-fn detect_bridge_for_pf(pf_iface: &str) -> Option<String> {
-    let bridge_path = format!("/sys/class/net/{}/master", pf_iface);
-    std::fs::read_link(&bridge_path)
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+/// IPC view of a profile's FDB state. Non-`daemon_watch` profiles have no
+/// reconciler status and report just their mode.
+fn fdb_runtime_status(mode: &FdbMode, status: Option<FdbStatus>) -> FdbRuntimeStatus {
+    let status = status.unwrap_or_default();
+    FdbRuntimeStatus {
+        mode: format!("{:?}", mode),
+        bridge: status.bridge,
+        managed_entries: status.entries.len() as u32,
+        last_sync_secs_ago: status.last_sync.map(|t| t.elapsed().as_secs()),
+        errors: status.errors,
+    }
 }
 
 #[cfg(test)]

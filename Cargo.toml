@@ -39,7 +39,6 @@ thiserror = "2"
 anyhow = "1"
 
 # File watching
-notify = "7"
 
 # Random
 rand = "0.8"
