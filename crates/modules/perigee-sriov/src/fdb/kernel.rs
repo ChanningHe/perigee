@@ -2,9 +2,16 @@
 
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::process::{Command, Output};
 
 use super::reconcile::FdbHost;
+
+const SYS_NET: &str = "/sys/class/net";
+
+/// Upper-device hops to follow from the PF. Real stacks are at most a few
+/// deep (PF -> bond -> VLAN -> bridge -> VLAN -> bridge).
+const MAX_UPPER_DEPTH: usize = 6;
 
 pub struct SystemHost;
 
@@ -13,11 +20,10 @@ impl FdbHost for SystemHost {
         Ok(perigee_core::sysfs::find_iface_by_mac(pf_mac)?)
     }
 
-    fn bridge_of(&self, pf_dev: &str) -> Option<String> {
-        let master = format!("/sys/class/net/{}/master", pf_dev);
-        std::fs::read_link(master)
-            .ok()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+    fn bridges_of(&self, pf_dev: &str) -> BTreeSet<String> {
+        reachable_bridges(pf_dev, sysfs_uppers, |dev| {
+            Path::new(SYS_NET).join(dev).join("bridge").is_dir()
+        })
     }
 
     fn present_macs(&self, pf_dev: &str) -> Result<BTreeSet<String>> {
@@ -40,6 +46,48 @@ impl FdbHost for SystemHost {
         // ENOENT / missing device: the entry is already gone.
         bridge_fdb("del", mac, pf_dev, &["No such file", "Cannot find device"])
     }
+}
+
+/// Walk the upper-device graph from `start` and collect every Linux bridge on
+/// it. Uppers cover both the master (bridge, bond) and stacked devices (VLAN),
+/// so PF -> bond0 -> vmbr0 and PF -> PF.100 -> vmbr1 are both found; an OVS
+/// master fails `is_bridge` and is skipped. The walk continues through
+/// bridges, since a bridge's own VLAN device can be a port of another bridge
+/// (e.g. an SDN vnet on `vmbr0.100`).
+fn reachable_bridges(
+    start: &str,
+    uppers: impl Fn(&str) -> Vec<String>,
+    is_bridge: impl Fn(&str) -> bool,
+) -> BTreeSet<String> {
+    let mut seen = BTreeSet::from([start.to_string()]);
+    let mut frontier = vec![start.to_string()];
+    let mut bridges = BTreeSet::new();
+    for _ in 0..MAX_UPPER_DEPTH {
+        let next: Vec<String> = frontier
+            .iter()
+            .flat_map(|dev| uppers(dev))
+            .filter(|up| seen.insert(up.clone()))
+            .collect();
+        bridges.extend(next.iter().filter(|up| is_bridge(up)).cloned());
+        frontier = next;
+    }
+    bridges
+}
+
+/// Upper devices of `dev`: the targets of its `upper_<name>` sysfs links.
+fn sysfs_uppers(dev: &str) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(Path::new(SYS_NET).join(dev)) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            e.file_name()
+                .to_str()
+                .and_then(|n| n.strip_prefix("upper_"))
+                .map(str::to_string)
+        })
+        .collect()
 }
 
 /// MACs of the `self` entries in `bridge -j fdb show` output. Entries from the
@@ -116,6 +164,57 @@ mod tests {
             macs.into_iter().collect::<Vec<_>>(),
             vec!["33:33:00:00:00:01", "52:54:00:aa:bb:cc"]
         );
+    }
+
+    /// Resolve bridges over a fake upper graph given as (dev, upper) edges.
+    fn bridges(edges: &[(&str, &str)], bridge_devs: &[&str]) -> Vec<String> {
+        let uppers = |dev: &str| {
+            edges
+                .iter()
+                .filter(|(d, _)| *d == dev)
+                .map(|(_, u)| u.to_string())
+                .collect()
+        };
+        reachable_bridges("pf", uppers, |d| bridge_devs.contains(&d))
+            .into_iter()
+            .collect()
+    }
+
+    #[test]
+    fn finds_direct_bridge() {
+        assert_eq!(bridges(&[("pf", "vmbr0")], &["vmbr0"]), vec!["vmbr0"]);
+    }
+
+    #[test]
+    fn finds_bridge_through_bond() {
+        let edges = [("pf", "bond0"), ("bond0", "vmbr0")];
+        assert_eq!(bridges(&edges, &["vmbr0"]), vec!["vmbr0"]);
+    }
+
+    #[test]
+    fn finds_bridges_through_vlan_devices() {
+        let edges = [
+            ("pf", "vmbr0"),
+            ("pf", "pf.100"),
+            ("pf.100", "vmbr1"),
+            ("vmbr0", "vmbr0.200"),
+            ("vmbr0.200", "vnet1"),
+        ];
+        assert_eq!(
+            bridges(&edges, &["vmbr0", "vmbr1", "vnet1"]),
+            vec!["vmbr0", "vmbr1", "vnet1"]
+        );
+    }
+
+    #[test]
+    fn ovs_master_is_not_a_bridge() {
+        assert!(bridges(&[("pf", "ovs-system")], &[]).is_empty());
+    }
+
+    #[test]
+    fn upper_cycles_terminate() {
+        let edges = [("pf", "a"), ("a", "pf"), ("a", "vmbr0")];
+        assert_eq!(bridges(&edges, &["vmbr0"]), vec!["vmbr0"]);
     }
 
     #[test]

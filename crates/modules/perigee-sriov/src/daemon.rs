@@ -180,14 +180,13 @@ impl SriovModule {
         let Some(status) = self.fdb.status(profile_name) else {
             return Vec::new();
         };
-        let bridge = status.bridge.unwrap_or_default();
         status
             .entries
             .into_iter()
             .map(|e| FdbEntryInfo {
                 mac: e.mac,
-                vmid: e.vmids.into_iter().collect::<Vec<_>>().join(","),
-                bridge: bridge.clone(),
+                vmid: join(e.vmids),
+                bridge: join(e.bridges),
             })
             .collect()
     }
@@ -486,13 +485,17 @@ fn build_vf_status(config: &SriovProfileConfig, pf_iface: Option<&str>) -> Vec<V
     vfs
 }
 
+fn join(items: impl IntoIterator<Item = String>) -> String {
+    items.into_iter().collect::<Vec<_>>().join(",")
+}
+
 /// IPC view of a profile's FDB state. Non-`daemon_watch` profiles have no
 /// reconciler status and report just their mode.
 fn fdb_runtime_status(mode: &FdbMode, status: Option<FdbStatus>) -> FdbRuntimeStatus {
     let status = status.unwrap_or_default();
     FdbRuntimeStatus {
         mode: format!("{:?}", mode),
-        bridge: status.bridge,
+        bridge: (!status.bridges.is_empty()).then(|| join(status.bridges)),
         managed_entries: status.entries.len() as u32,
         last_sync_secs_ago: status.last_sync.map(|t| t.elapsed().as_secs()),
         errors: status.errors,

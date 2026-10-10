@@ -17,8 +17,9 @@ use crate::config::FdbMode;
 pub trait FdbHost {
     /// Interface name of the PF with this permanent MAC.
     fn resolve_pf(&self, pf_mac: &str) -> Result<String>;
-    /// Linux bridge the PF forwards into, if any.
-    fn bridge_of(&self, pf_dev: &str) -> Option<String>;
+    /// Linux bridges the PF forwards into, directly or through stacked devices
+    /// (bond, VLAN). Empty when the PF is not behind any Linux bridge.
+    fn bridges_of(&self, pf_dev: &str) -> BTreeSet<String>;
     /// MACs currently in the PF's own (`self`) FDB.
     fn present_macs(&self, pf_dev: &str) -> Result<BTreeSet<String>>;
     fn add(&self, mac: &str, pf_dev: &str) -> Result<()>;
@@ -44,18 +45,19 @@ pub struct FdbTarget {
     pub mode: FdbMode,
 }
 
-/// One managed entry and the guests whose NICs need it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One managed entry and the guest NICs (VM ids, bridges) that need it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FdbEntry {
     pub mac: String,
     pub vmids: BTreeSet<String>,
+    pub bridges: BTreeSet<String>,
 }
 
 /// Outcome of the last reconcile pass for one `daemon_watch` profile.
 #[derive(Debug, Clone, Default)]
 pub struct FdbStatus {
     pub pf_dev: Option<String>,
-    pub bridge: Option<String>,
+    pub bridges: BTreeSet<String>,
     pub entries: Vec<FdbEntry>,
     pub errors: Vec<String>,
     pub last_sync: Option<Instant>,
@@ -78,7 +80,7 @@ pub struct Reconciled {
 
 /// Converge every target and return the new ownership map and statuses.
 ///
-/// - `daemon_watch`: sync the PF to the guests on its bridge.
+/// - `daemon_watch`: sync the PF to the guests on its bridges.
 /// - `hookscript`: hand over: drop ownership but keep the entries, since
 ///   running guests still need them until their post-stop hook removes them.
 /// - `disabled`, or a profile that no longer exists: delete owned entries.
@@ -121,15 +123,21 @@ pub fn reconcile(
     }
 }
 
-/// Group the guest MACs on `bridge`. A MAC shared by several guests (e.g. a
-/// clone that kept its template's MAC) stays needed while any of them has it.
-pub fn desired_on_bridge(guests: &[GuestNic], bridge: &str) -> BTreeMap<String, BTreeSet<String>> {
-    let mut desired: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for nic in guests.iter().filter(|n| n.bridge == bridge) {
-        desired
-            .entry(nic.mac.clone())
-            .or_default()
-            .insert(nic.vmid.clone());
+/// Group the guest MACs on any of `bridges`. A MAC shared by several guests
+/// (e.g. a clone that kept its template's MAC) stays needed while any of them
+/// has it.
+pub fn desired_on_bridges(
+    guests: &[GuestNic],
+    bridges: &BTreeSet<String>,
+) -> BTreeMap<String, FdbEntry> {
+    let mut desired: BTreeMap<String, FdbEntry> = BTreeMap::new();
+    for nic in guests.iter().filter(|n| bridges.contains(&n.bridge)) {
+        let entry = desired.entry(nic.mac.clone()).or_insert_with(|| FdbEntry {
+            mac: nic.mac.clone(),
+            ..FdbEntry::default()
+        });
+        entry.vmids.insert(nic.vmid.clone());
+        entry.bridges.insert(nic.bridge.clone());
     }
     desired
 }
@@ -150,10 +158,11 @@ fn sync_target(
             return (prev.cloned(), FdbStatus::failed(None, msg));
         }
     };
-    let Some(bridge) = host.bridge_of(&pf) else {
-        let msg = format!("PF {pf} is not a Linux bridge port");
+    let bridges = host.bridges_of(&pf);
+    if bridges.is_empty() {
+        let msg = format!("PF {pf} is not behind a Linux bridge");
         return (prev.cloned(), FdbStatus::failed(Some(pf), msg));
-    };
+    }
     let present = match host.present_macs(&pf) {
         Ok(p) => p,
         Err(e) => {
@@ -162,12 +171,12 @@ fn sync_target(
         }
     };
 
-    let desired = desired_on_bridge(guests, &bridge);
+    let desired = desired_on_bridges(guests, &bridges);
     let prev_macs = prev.map(|p| p.macs.clone()).unwrap_or_default();
     let mut errors = Vec::new();
 
     // Desired MACs already on the PF are claimed: they belong to guests on
-    // this bridge, which is exactly the domain perigee manages. This also
+    // the PF's bridges, which is exactly the domain perigee manages. This also
     // adopts entries left by an older daemon run or a hookscript.
     let mut macs: BTreeSet<String> = desired
         .keys()
@@ -192,16 +201,19 @@ fn sync_target(
         }
     }
 
+    // A MAC kept only for a delete retry has no guests left.
     let entries = macs
         .iter()
-        .map(|mac| FdbEntry {
-            mac: mac.clone(),
-            vmids: desired.get(mac).cloned().unwrap_or_default(),
+        .map(|mac| {
+            desired.get(mac).cloned().unwrap_or_else(|| FdbEntry {
+                mac: mac.clone(),
+                ..FdbEntry::default()
+            })
         })
         .collect();
     let status = FdbStatus {
         pf_dev: Some(pf.clone()),
-        bridge: Some(bridge),
+        bridges,
         entries,
         errors,
         last_sync: Some(Instant::now()),
@@ -242,7 +254,7 @@ mod tests {
     /// In-memory host: one PF with a self FDB.
     struct FakeHost {
         fdb: RefCell<BTreeSet<String>>,
-        bridge: Option<String>,
+        bridges: BTreeSet<String>,
         pf_online: bool,
         failing: BTreeSet<String>,
     }
@@ -251,7 +263,7 @@ mod tests {
         fn new(present: &[&str]) -> Self {
             Self {
                 fdb: RefCell::new(present.iter().map(|s| s.to_string()).collect()),
-                bridge: Some(BR.to_string()),
+                bridges: [BR.to_string()].into(),
                 pf_online: true,
                 failing: BTreeSet::new(),
             }
@@ -275,8 +287,8 @@ mod tests {
                 anyhow::bail!("no such interface")
             }
         }
-        fn bridge_of(&self, _pf_dev: &str) -> Option<String> {
-            self.bridge.clone()
+        fn bridges_of(&self, _pf_dev: &str) -> BTreeSet<String> {
+            self.bridges.clone()
         }
         fn present_macs(&self, _pf_dev: &str) -> Result<BTreeSet<String>> {
             Ok(self.fdb.borrow().clone())
@@ -336,6 +348,24 @@ mod tests {
         assert_eq!(host.fdb(), vec![A]);
         assert_eq!(r.owned, owned(&[A]));
         assert!(r.statuses["p"].errors.is_empty());
+    }
+
+    #[test]
+    fn covers_every_bridge_the_pf_reaches() {
+        // e.g. PF in vmbr0 and PF.100 in vmbr1: guests on both sit behind
+        // the PF's embedded switch.
+        let mut host = FakeHost::new(&[]);
+        host.bridges = [BR, "vmbr1"].map(String::from).into();
+        let guests = [nic("100", A, BR), nic("101", B, "vmbr1")];
+        let r = reconcile(
+            &host,
+            &[target(FdbMode::DaemonWatch)],
+            &OwnedMap::new(),
+            &guests,
+        );
+        assert_eq!(host.fdb(), vec![A, B]);
+        let entry_b = &r.statuses["p"].entries[1];
+        assert_eq!(entry_b.bridges, ["vmbr1".to_string()].into());
     }
 
     #[test]
@@ -440,7 +470,7 @@ mod tests {
     #[test]
     fn unbridged_pf_keeps_ownership_and_reports() {
         let mut host = FakeHost::new(&[A]);
-        host.bridge = None;
+        host.bridges.clear();
         let r = reconcile(&host, &[target(FdbMode::DaemonWatch)], &owned(&[A]), &[]);
         assert_eq!(r.owned, owned(&[A]));
         assert!(r.statuses["p"].errors[0].contains("bridge"));
