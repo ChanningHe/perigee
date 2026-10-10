@@ -292,18 +292,10 @@ pub async fn handle_input(state: &mut AppState, key: KeyEvent) {
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => state.should_quit = true,
         KeyCode::Up | KeyCode::Char('k') => {
-            if module_count > 0 {
-                state.home_cursor = if state.home_cursor == 0 {
-                    module_count - 1
-                } else {
-                    state.home_cursor - 1
-                };
-            }
+            state.home_cursor = perigee_tui::wrap_step(state.home_cursor, module_count, false);
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            if module_count > 0 {
-                state.home_cursor = (state.home_cursor + 1) % module_count;
-            }
+            state.home_cursor = perigee_tui::wrap_step(state.home_cursor, module_count, true);
         }
         KeyCode::Enter => match state.home_cursor {
             0 => {

@@ -155,19 +155,13 @@ pub fn handle_input(sriov: &mut SriovState, key: KeyEvent) {
     let pf_count = sriov.detected_pfs.len();
 
     match key.code {
+        // Not match guards: an unmatched 'k'/'j' would fall through to the
+        // name-typing arm below.
         KeyCode::Up | KeyCode::Char('k') => {
-            if pf_count > 0 {
-                if sriov.selected_pf == 0 {
-                    sriov.selected_pf = pf_count - 1;
-                } else {
-                    sriov.selected_pf -= 1;
-                }
-            }
+            sriov.selected_pf = common::wrap_step(sriov.selected_pf, pf_count, false);
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            if pf_count > 0 {
-                sriov.selected_pf = (sriov.selected_pf + 1) % pf_count;
-            }
+            sriov.selected_pf = common::wrap_step(sriov.selected_pf, pf_count, true);
         }
         KeyCode::Enter => {
             if let Some(pf) = sriov.detected_pfs.get(sriov.selected_pf) {

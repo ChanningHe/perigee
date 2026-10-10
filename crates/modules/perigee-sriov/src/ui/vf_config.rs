@@ -412,10 +412,9 @@ pub fn render_vf_table(frame: &mut Frame, sriov: &SriovState, area: Rect) {
 pub fn handle_vf_table_input(sriov: &mut SriovState, key: KeyEvent) {
     if sriov.edit_focus == Some(EditFocus::VfVlanId) {
         match key.code {
-            KeyCode::Char(c) if c.is_ascii_digit() => {
-                if sriov.vlan_id_buf.len() < 4 {
-                    sriov.vlan_id_buf.push(c);
-                }
+            // No other arm takes Char, so a 5th digit still falls to `_`.
+            KeyCode::Char(c) if c.is_ascii_digit() && sriov.vlan_id_buf.len() < 4 => {
+                sriov.vlan_id_buf.push(c);
             }
             KeyCode::Backspace => {
                 sriov.vlan_id_buf.pop();

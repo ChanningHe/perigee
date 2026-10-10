@@ -427,19 +427,12 @@ pub async fn handle_profiles_input(sriov: &mut SriovState, key: KeyEvent) -> Sri
         KeyCode::Char('q') | KeyCode::Esc => {
             return SriovUiAction::GoBack;
         }
-        KeyCode::Up | KeyCode::Char('k') => {
-            if len > 0 {
-                let i = sriov.profile_list_state.selected().unwrap_or(0);
-                let new = if i == 0 { len - 1 } else { i - 1 };
-                sriov.profile_list_state.select(Some(new));
-            }
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if len > 0 {
-                let i = sriov.profile_list_state.selected().unwrap_or(0);
-                let new = if i >= len - 1 { 0 } else { i + 1 };
-                sriov.profile_list_state.select(Some(new));
-            }
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {
+            let forward = matches!(key.code, KeyCode::Down | KeyCode::Char('j'));
+            let i = sriov.profile_list_state.selected().unwrap_or(0);
+            // An empty list has no selection; never select a missing row.
+            let next = (len > 0).then(|| common::wrap_step(i, len, forward));
+            sriov.profile_list_state.select(next);
         }
         KeyCode::Enter | KeyCode::Char('s') => {
             if let Some(idx) = sriov.profile_list_state.selected() {

@@ -142,3 +142,31 @@ pub fn state_color(state: &perigee_core::ipc::ProfileState) -> Color {
         perigee_core::ipc::ProfileState::Error => ERROR,
     }
 }
+
+/// Move a list cursor one step with wrap-around. An empty list yields 0.
+pub fn wrap_step(i: usize, len: usize, forward: bool) -> usize {
+    match len {
+        0 => 0,
+        _ if forward => (i + 1) % len,
+        _ => (i % len + len - 1) % len,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrap_step;
+
+    #[test]
+    fn wrap_step_cycles_both_ways() {
+        assert_eq!(wrap_step(0, 3, true), 1);
+        assert_eq!(wrap_step(2, 3, true), 0);
+        assert_eq!(wrap_step(0, 3, false), 2);
+        assert_eq!(wrap_step(2, 3, false), 1);
+    }
+
+    #[test]
+    fn wrap_step_on_empty_list_stays_at_zero() {
+        assert_eq!(wrap_step(0, 0, true), 0);
+        assert_eq!(wrap_step(0, 0, false), 0);
+    }
+}
