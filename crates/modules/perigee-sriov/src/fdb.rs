@@ -299,31 +299,36 @@ fn is_mac_address(s: &str) -> bool {
 }
 
 fn bridge_fdb_add(mac: &str, dev: &str) -> Result<()> {
-    let output = std::process::Command::new("bridge")
-        .args(["fdb", "add", mac, "dev", dev])
-        .output()
-        .context("failed to execute `bridge fdb add`")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // "already exists" is not a real error
-        if !stderr.contains("File exists") {
-            bail!("bridge fdb add failed: {}", stderr.trim());
-        }
-    }
-    Ok(())
+    // EEXIST: the entry is already there, which is the desired state.
+    bridge_fdb("add", mac, dev, "File exists")
 }
 
 fn bridge_fdb_del(mac: &str, dev: &str) -> Result<()> {
+    // ENOENT: the entry is already gone, which is the desired state.
+    bridge_fdb("del", mac, dev, "No such file")
+}
+
+/// Arguments for `bridge fdb <op>`. `self` is explicit: with no flag the kernel
+/// targets the master bridge's software FDB when `dev` is a bridge port, which
+/// would install the guest MAC as a host-local entry instead of programming
+/// the PF's embedded switch.
+fn fdb_args<'a>(op: &'a str, mac: &'a str, dev: &'a str) -> [&'a str; 6] {
+    ["fdb", op, mac, "dev", dev, "self"]
+}
+
+/// Run `bridge fdb <op>`, treating a stderr containing `benign` as success.
+/// The C locale keeps that stderr match independent of the host's language.
+fn bridge_fdb(op: &str, mac: &str, dev: &str, benign: &str) -> Result<()> {
     let output = std::process::Command::new("bridge")
-        .args(["fdb", "del", mac, "dev", dev])
+        .args(fdb_args(op, mac, dev))
+        .env("LC_ALL", "C")
         .output()
-        .context("failed to execute `bridge fdb del`")?;
+        .with_context(|| format!("failed to execute `bridge fdb {op}`"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.contains("No such file") {
-            bail!("bridge fdb del failed: {}", stderr.trim());
+        if !stderr.contains(benign) {
+            bail!("bridge fdb {op} failed: {}", stderr.trim());
         }
     }
     Ok(())
@@ -390,8 +395,17 @@ exit 0
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_macs_for_bridge, render_hookscript};
+    use super::{fdb_args, parse_macs_for_bridge, render_hookscript};
     use std::path::Path;
+
+    #[test]
+    fn fdb_commands_target_the_device_fdb() {
+        // Without `self` the kernel would program the bridge's software FDB.
+        assert_eq!(
+            fdb_args("add", "52:54:00:00:00:01", "enp1s0f0"),
+            ["fdb", "add", "52:54:00:00:00:01", "dev", "enp1s0f0", "self"]
+        );
+    }
 
     #[test]
     fn hookscript_always_exits_zero() {
