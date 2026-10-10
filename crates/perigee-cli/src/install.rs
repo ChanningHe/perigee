@@ -24,7 +24,8 @@ ExecStart=/usr/local/bin/perigee daemon
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5s
-TimeoutStartSec=30
+# READY waits for VF creation, which takes a while with many VFs.
+TimeoutStartSec=120
 
 [Install]
 WantedBy=multi-user.target

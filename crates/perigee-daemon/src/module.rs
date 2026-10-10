@@ -2,9 +2,25 @@ use async_trait::async_trait;
 use perigee_core::ipc::{FdbEntryInfo, ModuleStatus, ProfileDetailStatus, ProfileEvent};
 use std::collections::HashMap;
 
+/// When a module's boot-time `apply` runs relative to host networking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootPhase {
+    /// Must finish before the daemon reports READY. The unit is ordered
+    /// `Before=network.target`, so networking starts only afterwards (e.g.
+    /// SR-IOV VFs must exist before ifupdown configures them).
+    PreNetwork,
+    /// Runs after READY, once PVE's cluster filesystem (/etc/pve) is mounted,
+    /// which itself depends on networking. Waiting for it before READY would
+    /// deadlock boot.
+    PostNetwork,
+}
+
 #[async_trait]
 pub trait Module: Send + Sync {
     fn name(&self) -> &str;
+    fn boot_phase(&self) -> BootPhase {
+        BootPhase::PostNetwork
+    }
     async fn init(&mut self, config: &toml::Value) -> anyhow::Result<()>;
     async fn apply(&mut self) -> anyhow::Result<()>;
     async fn reload(&mut self, config: &toml::Value) -> anyhow::Result<()>;

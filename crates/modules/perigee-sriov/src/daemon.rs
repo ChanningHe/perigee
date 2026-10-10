@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
-use perigee_daemon::module::Module;
+use perigee_daemon::module::{BootPhase, Module};
 
 #[derive(Debug, Clone)]
 struct ProfileRuntime {
@@ -257,6 +257,11 @@ fn is_nic_offline(e: &anyhow::Error) -> bool {
 impl Module for SriovModule {
     fn name(&self) -> &str {
         "sriov"
+    }
+
+    /// VFs must exist before networking starts: ifupdown may configure them.
+    fn boot_phase(&self) -> BootPhase {
+        BootPhase::PreNetwork
     }
 
     async fn init(&mut self, _config: &toml::Value) -> Result<()> {
