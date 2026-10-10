@@ -129,15 +129,58 @@ pub fn read_link_speed(iface: &str) -> Result<String> {
     read_sysfs_value(&path)
 }
 
-/// Find the interface name that matches a given MAC address.
+/// Find the physical interface that has the given MAC address.
+///
+/// Virtual devices stacked on a NIC (bridges, bonds, VLANs) usually inherit
+/// its MAC, e.g. PVE's vmbr0 takes the first port's address, so a bare address
+/// match could return `vmbr0` instead of the PF depending on sysfs order. Only
+/// interfaces backed by a device (`/sys/class/net/<if>/device`) are matched.
 pub fn find_iface_by_mac(mac: &str) -> Result<String> {
-    let mac_lower = mac.to_lowercase();
-    for iface in list_net_interfaces()? {
-        if let Ok(addr) = read_iface_address(&iface) {
-            if addr.to_lowercase() == mac_lower {
-                return Ok(iface);
-            }
-        }
+    let candidates = list_net_interfaces()?.into_iter().filter_map(|iface| {
+        let addr = read_iface_address(&iface).ok()?;
+        let is_physical = net_device_path(&iface).join("device").exists();
+        Some((iface, addr, is_physical))
+    });
+    first_physical_match(mac, candidates)
+        .ok_or_else(|| PerigeeError::InterfaceNotFound(mac.to_string()))
+}
+
+/// First `(iface, address, is_physical)` candidate that is physical and has
+/// `mac` (case-insensitive).
+fn first_physical_match(
+    mac: &str,
+    candidates: impl IntoIterator<Item = (String, String, bool)>,
+) -> Option<String> {
+    candidates
+        .into_iter()
+        .find(|(_, addr, is_physical)| *is_physical && addr.eq_ignore_ascii_case(mac))
+        .map(|(iface, _, _)| iface)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::first_physical_match;
+
+    fn c(iface: &str, addr: &str, physical: bool) -> (String, String, bool) {
+        (iface.to_string(), addr.to_string(), physical)
     }
-    Err(PerigeeError::InterfaceNotFound(mac.to_string()))
+
+    #[test]
+    fn skips_virtual_devices_sharing_the_pf_mac() {
+        let candidates = [
+            c("vmbr0", "b8:ce:f6:00:00:01", false),
+            c("bond0", "b8:ce:f6:00:00:01", false),
+            c("enp1s0f0", "B8:CE:F6:00:00:01", true),
+        ];
+        assert_eq!(
+            first_physical_match("b8:ce:f6:00:00:01", candidates).as_deref(),
+            Some("enp1s0f0")
+        );
+    }
+
+    #[test]
+    fn no_physical_match_is_none() {
+        let candidates = [c("vmbr0", "b8:ce:f6:00:00:01", false)];
+        assert!(first_physical_match("b8:ce:f6:00:00:01", candidates).is_none());
+    }
 }
