@@ -335,7 +335,28 @@ fn bridge_fdb_del(mac: &str, dev: &str) -> Result<()> {
 
 /// Generate a hookscript for FDB management (fallback mode).
 pub fn generate_hookscript(output_path: &Path, pf_dev: &str) -> Result<()> {
-    let script = format!(
+    let script = render_hookscript(output_path, pf_dev);
+
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(output_path, script)?;
+
+    #[cfg(unix)]
+    {
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(output_path, std::fs::Permissions::from_mode(0o755))?;
+        }
+    }
+
+    info!(path = %output_path.display(), "hookscript generated");
+    Ok(())
+}
+
+/// Render the hookscript text.
+fn render_hookscript(output_path: &Path, pf_dev: &str) -> String {
+    format!(
         r#"#!/bin/bash
 # Perigee FDB hookscript - auto-generated
 # Attach to VM: qm set <vmid> --hookscript local:snippets/$(basename {output_path})
@@ -363,31 +384,26 @@ case "$PHASE" in
         done
         ;;
 esac
+# Always succeed: PVE aborts the guest start on a failing pre-start hook.
+exit 0
 "#,
         output_path = output_path.display(),
         pf_dev = pf_dev,
-    );
-
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(output_path, script)?;
-
-    #[cfg(unix)]
-    {
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(output_path, std::fs::Permissions::from_mode(0o755))?;
-        }
-    }
-
-    info!(path = %output_path.display(), "hookscript generated");
-    Ok(())
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_macs_for_bridge;
+    use super::{parse_macs_for_bridge, render_hookscript};
+    use std::path::Path;
+
+    #[test]
+    fn hookscript_always_exits_zero() {
+        // PVE aborts the guest start when a pre-start hook exits non-zero, and
+        // `bridge fdb add` fails whenever the entry already exists.
+        let script = render_hookscript(Path::new("/tmp/hook.sh"), "enp1s0f0");
+        assert!(script.trim_end().ends_with("exit 0"));
+    }
 
     const CONFIG: &str = "\
 name: testvm
