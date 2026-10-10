@@ -1,5 +1,6 @@
 //! Map PVE VM passthrough (`hostpci`) entries to the VFs they reference.
 
+use crate::pve_conf;
 use perigee_core::ipc::VfUser;
 use std::collections::HashMap;
 use std::path::Path;
@@ -50,34 +51,17 @@ fn vm_is_running(vmid: &str) -> bool {
     Path::new(&format!("/proc/{}", pid)).exists()
 }
 
-/// True for `hostpci<digits>` keys (hostpci0..hostpci15), not just anything
-/// starting with "hostpci".
-fn is_hostpci_key(key: &str) -> bool {
-    key.strip_prefix("hostpci")
-        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-}
-
-/// Extract the raw PCI addresses from a config's `hostpci` lines. A value looks
-/// like `0000:41:00.1,pcie=1` or `0000:41:00.1;0000:41:00.2`; mapping-based
-/// entries (`mapping=foo`) are skipped since they carry no BDF.
-///
-/// Scanning stops at the first `[section]` header: PVE stores VM snapshots in
-/// the same file under `[name]` sections with their own historical `hostpci`
-/// lines, which must NOT be attributed to the live VM.
+/// Extract the raw PCI addresses from a config's live `hostpci<digits>` lines
+/// (snapshot sections are skipped, see [`pve_conf::main_section`]). A value
+/// looks like `0000:41:00.1,pcie=1` or `0000:41:00.1;0000:41:00.2`;
+/// mapping-based entries (`mapping=foo`) are skipped since they carry no BDF.
 fn hostpci_addrs(content: &str) -> Vec<String> {
     let mut out = Vec::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            break;
-        }
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        if !is_hostpci_key(key.trim()) {
+    for (key, value) in pve_conf::main_section(content) {
+        if !pve_conf::is_indexed_key(key, "hostpci") {
             continue;
         }
-        let devices = value.trim().split(',').next().unwrap_or("").trim();
+        let devices = value.split(',').next().unwrap_or("").trim();
         for addr in devices.split(';') {
             let addr = addr.trim();
             if addr.is_empty() || addr.contains('=') {
@@ -129,10 +113,6 @@ runningmachine: pc-i440fx
     fn rejects_non_hostpci_keys() {
         // Only hostpci<digits> counts; a stray key starting with "hostpci"
         // must be ignored.
-        assert!(is_hostpci_key("hostpci0"));
-        assert!(is_hostpci_key("hostpci15"));
-        assert!(!is_hostpci_key("hostpcix"));
-        assert!(!is_hostpci_key("hostpci"));
         assert!(hostpci_addrs("hostpcixyz: 0000:41:00.1\n").is_empty());
     }
 

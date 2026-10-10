@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::config::FdbMode;
+use crate::pve_conf;
 
 const PVE_QEMU_DIR: &str = "/etc/pve/qemu-server";
 const PVE_LXC_DIR: &str = "/etc/pve/lxc";
@@ -259,15 +260,10 @@ fn extract_macs_from_config(path: &Path, bridge: &str) -> Result<Vec<String>> {
 fn parse_macs_for_bridge(content: &str, bridge: &str) -> Vec<String> {
     let mut macs = Vec::new();
 
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if !trimmed.starts_with("net") {
+    for (key, value) in pve_conf::main_section(content) {
+        if !pve_conf::is_indexed_key(key, "net") {
             continue;
         }
-        let Some(colon) = trimmed.find(':') else {
-            continue;
-        };
-        let value = trimmed[colon + 1..].trim();
 
         let mut line_mac: Option<String> = None;
         let mut line_bridge: Option<&str> = None;
@@ -428,6 +424,37 @@ scsi0: local-lvm:vm-100-disk-0,size=32G
     #[test]
     fn unrelated_bridge_yields_nothing() {
         assert!(parse_macs_for_bridge(CONFIG, "vmbr9").is_empty());
+    }
+
+    #[test]
+    fn ignores_snapshot_and_pending_sections() {
+        // Only the live NIC counts; pending and snapshot MACs are not in use.
+        let cfg = "\
+net0: virtio=52:54:00:00:00:01,bridge=vmbr0
+[PENDING]
+net0: virtio=52:54:00:00:00:02,bridge=vmbr0
+[pre-upgrade]
+net0: virtio=52:54:00:00:00:03,bridge=vmbr0
+";
+        assert_eq!(
+            parse_macs_for_bridge(cfg, "vmbr0"),
+            vec!["52:54:00:00:00:01"]
+        );
+    }
+
+    #[test]
+    fn only_netn_keys_count() {
+        let cfg = "netx: virtio=52:54:00:00:00:09,bridge=vmbr0\n";
+        assert!(parse_macs_for_bridge(cfg, "vmbr0").is_empty());
+    }
+
+    #[test]
+    fn parses_lxc_hwaddr() {
+        let cfg = "net0: name=eth0,bridge=vmbr0,hwaddr=BC:24:11:AA:BB:CC,ip=dhcp,type=veth\n";
+        assert_eq!(
+            parse_macs_for_bridge(cfg, "vmbr0"),
+            vec!["bc:24:11:aa:bb:cc"]
+        );
     }
 
     #[test]
