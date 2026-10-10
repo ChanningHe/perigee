@@ -15,6 +15,12 @@ pub const DEFAULT_HOOKSCRIPT_PATH: &str = "/var/lib/vz/snippets/perigee-bridgefi
 /// path is never overwritten.
 const MARKER: &str = "# Perigee FDB hookscript";
 
+/// Upper bound on one hook run (coreutils `timeout`): a hung pmxcfs read or
+/// `bridge` call would otherwise stall the guest start indefinitely. After the
+/// grace period the hook is killed outright.
+const HOOK_TIMEOUT_SECS: u32 = 30;
+const HOOK_KILL_GRACE_SECS: u32 = 5;
+
 /// Write the hookscript to `output_path`, invoking `perigee_bin`.
 pub fn generate_hookscript(output_path: &Path, perigee_bin: &Path) -> Result<()> {
     match std::fs::read(output_path) {
@@ -52,7 +58,7 @@ fn render_hookscript(perigee_bin: &Path) -> String {
 {MARKER} - auto-generated, do not edit.
 # Attach: qm set <vmid> --hookscript <storage>:snippets/<file>  (pct set for CTs)
 # Acts on SR-IOV profiles whose FDB mode is "hookscript".
-"{bin}" sriov fdb-hook "$1" "$2" || true
+timeout -k {HOOK_KILL_GRACE_SECS} {HOOK_TIMEOUT_SECS} "{bin}" sriov fdb-hook "$1" "$2" || true
 exit 0
 "#,
         bin = perigee_bin.display(),
@@ -75,6 +81,13 @@ mod tests {
         let script = render_hookscript(Path::new("/usr/local/bin/perigee"));
         assert!(script.contains(r#""/usr/local/bin/perigee" sriov fdb-hook "$1" "$2" || true"#));
         assert!(script.trim_end().ends_with("exit 0"));
+    }
+
+    #[test]
+    fn hook_runtime_is_bounded() {
+        // A hung pmxcfs or `bridge` call must not stall `qm start` forever.
+        let script = render_hookscript(Path::new("/usr/local/bin/perigee"));
+        assert!(script.contains(r#"timeout -k 5 30 "/usr/local/bin/perigee" sriov fdb-hook"#));
     }
 
     #[test]
