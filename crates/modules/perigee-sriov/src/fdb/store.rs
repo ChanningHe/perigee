@@ -62,6 +62,7 @@ mod tests {
                 pf_mac: "b8:ce:f6:00:00:01".to_string(),
                 pf_dev: "enp1s0f0".to_string(),
                 macs: ["52:54:00:00:00:0a".to_string()].into(),
+                ..Owned::default()
             },
         )]);
         save(&path, &owned).unwrap();

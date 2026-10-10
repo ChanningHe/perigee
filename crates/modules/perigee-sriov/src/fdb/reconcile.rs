@@ -36,6 +36,11 @@ pub struct Owned {
     /// PF name at the time of the last sync (fallback when it is gone).
     pub pf_dev: String,
     pub macs: BTreeSet<String>,
+    /// Owned MACs no guest needed on the last pass; deleted only if still
+    /// unneeded on the next one, so a one-pass glitch (a bridge briefly gone
+    /// during `ifreload`, a config mid-rewrite) never causes an outage.
+    #[serde(default)]
+    pub stale: BTreeSet<String>,
 }
 
 /// Ownership per profile name.
@@ -195,7 +200,7 @@ fn sync_target(
     };
 
     let desired = desired_on_bridges(guests, &bridges);
-    let prev_macs = prev.map(|p| p.macs.clone()).unwrap_or_default();
+    let prev = prev.cloned().unwrap_or_default();
     let mut errors = Vec::new();
 
     // Desired MACs already on the PF are claimed: they belong to guests on
@@ -216,15 +221,20 @@ fn sync_target(
         }
     }
 
-    for mac in prev_macs.iter().filter(|m| !desired.contains_key(*m)) {
-        if let Err(e) = host.del(mac, &pf) {
+    let mut stale = BTreeSet::new();
+    for mac in prev.macs.iter().filter(|m| !desired.contains_key(*m)) {
+        if !prev.stale.contains(mac) {
+            // First pass without a guest: keep it one more pass.
+            stale.insert(mac.clone());
+        } else if let Err(e) = host.del(mac, &pf) {
             // Still installed: keep owning it so the next pass retries.
             errors.push(format!("del {mac}: {e:#}"));
-            macs.insert(mac.clone());
+            stale.insert(mac.clone());
         }
     }
+    macs.extend(stale.iter().cloned());
 
-    // A MAC kept only for a delete retry has no guests left.
+    // A stale MAC has no guests left.
     let entries = macs
         .iter()
         .map(|mac| {
@@ -245,6 +255,7 @@ fn sync_target(
         pf_mac: target.pf_mac.clone(),
         pf_dev: pf,
         macs,
+        stale,
     });
     (kept, status)
 }
@@ -281,6 +292,7 @@ fn release(
         pf_mac: owned.pf_mac.clone(),
         pf_dev: pf,
         macs: failed,
+        ..Owned::default()
     })
 }
 
@@ -296,6 +308,7 @@ mod tests {
                 pf_mac: PF_MAC.to_string(),
                 pf_dev: PF.to_string(),
                 macs: macs.iter().map(|s| s.to_string()).collect(),
+                ..Owned::default()
             },
         )])
     }
@@ -337,17 +350,29 @@ mod tests {
 
     #[test]
     fn removes_owned_mac_once_no_guest_needs_it() {
-        // MAC changed / NIC deleted / NIC moved to another bridge.
+        // MAC changed / NIC deleted / NIC moved to another bridge. The delete
+        // waits one pass so a transient glitch cannot cause an outage.
         let host = FakeHost::new(&[A]);
+        let targets = [target(FdbMode::DaemonWatch)];
         let guests = [nic("100", B, BR)];
-        let r = reconcile(
-            &host,
-            &[target(FdbMode::DaemonWatch)],
-            &owned(&[A]),
-            &guests,
-        );
+        let r = reconcile(&host, &targets, &owned(&[A]), &guests);
+        assert_eq!(host.fdb(), vec![A, B]);
+        assert_eq!(r.owned["p"].stale, [A.to_string()].into());
+
+        let r = reconcile(&host, &targets, &r.owned, &guests);
         assert_eq!(host.fdb(), vec![B]);
         assert_eq!(r.owned, owned(&[B]));
+    }
+
+    #[test]
+    fn transiently_missing_guest_is_not_deleted() {
+        // e.g. its bridge vanished for one pass during `ifreload -a`.
+        let host = FakeHost::new(&[A]);
+        let targets = [target(FdbMode::DaemonWatch)];
+        let r = reconcile(&host, &targets, &owned(&[A]), &[]);
+        let r = reconcile(&host, &targets, &r.owned, &[nic("100", A, BR)]);
+        assert_eq!(host.fdb(), vec![A]);
+        assert_eq!(r.owned, owned(&[A]));
     }
 
     #[test]
@@ -404,8 +429,10 @@ mod tests {
     fn failed_delete_is_kept_for_retry() {
         let mut host = FakeHost::new(&[A]);
         host.failing.insert(A.to_string());
-        let r = reconcile(&host, &[target(FdbMode::DaemonWatch)], &owned(&[A]), &[]);
-        assert_eq!(r.owned, owned(&[A]));
+        let targets = [target(FdbMode::DaemonWatch)];
+        let r = reconcile(&host, &targets, &owned(&[A]), &[]);
+        let r = reconcile(&host, &targets, &r.owned, &[]);
+        assert!(r.owned["p"].macs.contains(A));
         assert_eq!(r.statuses["p"].errors.len(), 1);
     }
 
