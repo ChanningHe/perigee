@@ -30,6 +30,10 @@ pub trait FdbHost {
 /// ever deleted, so foreign entries on the PF are left alone.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Owned {
+    /// Permanent MAC of the PF, used to re-resolve its current name.
+    #[serde(default)]
+    pub pf_mac: String,
+    /// PF name at the time of the last sync (fallback when it is gone).
     pub pf_dev: String,
     pub macs: BTreeSet<String>,
 }
@@ -237,23 +241,34 @@ fn sync_target(
         errors,
         last_sync: Some(Instant::now()),
     };
-    let kept = (!macs.is_empty()).then_some(Owned { pf_dev: pf, macs });
+    let kept = (!macs.is_empty()).then(|| Owned {
+        pf_mac: target.pf_mac.clone(),
+        pf_dev: pf,
+        macs,
+    });
     (kept, status)
 }
 
 /// Delete every owned entry not `claimed` (as `(pf_dev, mac)`) by another
 /// profile. Returns what could not be deleted, to retry.
+///
+/// The PF is re-resolved by MAC because its name may have changed since the
+/// entries were installed (a renamed netdev keeps its FDB); the recorded name
+/// is only the fallback when the PF is absent.
 fn release(
     host: &impl FdbHost,
     profile: &str,
     owned: &Owned,
     claimed: &BTreeSet<(String, String)>,
 ) -> Option<Owned> {
+    let pf = host
+        .resolve_pf(&owned.pf_mac)
+        .unwrap_or_else(|_| owned.pf_dev.clone());
     let failed: BTreeSet<String> = owned
         .macs
         .iter()
-        .filter(|mac| !claimed.contains(&(owned.pf_dev.clone(), (*mac).clone())))
-        .filter(|mac| match host.del(mac, &owned.pf_dev) {
+        .filter(|mac| !claimed.contains(&(pf.clone(), (*mac).clone())))
+        .filter(|mac| match host.del(mac, &pf) {
             Ok(()) => false,
             Err(e) => {
                 warn!(profile, mac = %mac, error = %e, "FDB release failed");
@@ -263,7 +278,8 @@ fn release(
         .cloned()
         .collect();
     (!failed.is_empty()).then(|| Owned {
-        pf_dev: owned.pf_dev.clone(),
+        pf_mac: owned.pf_mac.clone(),
+        pf_dev: pf,
         macs: failed,
     })
 }
@@ -277,6 +293,7 @@ mod tests {
         OwnedMap::from([(
             "p".to_string(),
             Owned {
+                pf_mac: PF_MAC.to_string(),
                 pf_dev: PF.to_string(),
                 macs: macs.iter().map(|s| s.to_string()).collect(),
             },
@@ -450,6 +467,17 @@ mod tests {
         assert_eq!(host.fdb(), vec![A]);
         assert!(r.owned.contains_key("q"));
         assert!(!r.owned.contains_key("p"));
+    }
+
+    #[test]
+    fn release_follows_a_renamed_pf() {
+        // Recorded as "eth9" before a rename; the PF is now found by MAC.
+        let host = FakeHost::new(&[A]);
+        let mut prev = owned(&[A]);
+        prev.get_mut("p").unwrap().pf_dev = "eth9".to_string();
+        let r = reconcile(&host, &[], &prev, &[]);
+        assert!(host.fdb().is_empty());
+        assert!(r.owned.is_empty());
     }
 
     #[test]

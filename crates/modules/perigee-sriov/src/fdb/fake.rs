@@ -36,7 +36,10 @@ impl FakeHost {
         self.fdb.borrow().iter().cloned().collect()
     }
 
-    fn check(&self, mac: &str) -> Result<()> {
+    fn check(&self, mac: &str, pf_dev: &str) -> Result<()> {
+        if pf_dev != PF {
+            anyhow::bail!("Cannot find device {pf_dev:?}");
+        }
         if self.failing.contains(mac) {
             anyhow::bail!("injected failure");
         }
@@ -58,13 +61,13 @@ impl FdbHost for FakeHost {
     fn present_macs(&self, _pf_dev: &str) -> Result<BTreeSet<String>> {
         Ok(self.fdb.borrow().clone())
     }
-    fn add(&self, mac: &str, _pf_dev: &str) -> Result<()> {
-        self.check(mac)?;
+    fn add(&self, mac: &str, pf_dev: &str) -> Result<()> {
+        self.check(mac, pf_dev)?;
         self.fdb.borrow_mut().insert(mac.to_string());
         Ok(())
     }
-    fn del(&self, mac: &str, _pf_dev: &str) -> Result<()> {
-        self.check(mac)?;
+    fn del(&self, mac: &str, pf_dev: &str) -> Result<()> {
+        self.check(mac, pf_dev)?;
         self.fdb.borrow_mut().remove(mac);
         Ok(())
     }
