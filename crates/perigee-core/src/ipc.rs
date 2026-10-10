@@ -152,6 +152,17 @@ pub struct FdbRuntimeStatus {
     pub errors: Vec<String>,
 }
 
+impl FdbRuntimeStatus {
+    /// One-line view of where FDB sync stands, e.g. `vmbr0, synced 4s ago`.
+    pub fn sync_summary(&self) -> String {
+        let bridge = self.bridge.as_deref().unwrap_or("no bridge");
+        match self.last_sync_secs_ago {
+            Some(secs) => format!("{bridge}, synced {secs}s ago"),
+            None => format!("{bridge}, never synced"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileEvent {
     pub timestamp: DateTime<Utc>,
@@ -173,5 +184,29 @@ impl std::fmt::Display for EventLevel {
             Self::Warn => write!(f, "WARN"),
             Self::Error => write!(f, "ERROR"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fdb(bridge: Option<&str>, secs: Option<u64>) -> FdbRuntimeStatus {
+        FdbRuntimeStatus {
+            mode: "DaemonWatch".into(),
+            bridge: bridge.map(String::from),
+            managed_entries: 0,
+            last_sync_secs_ago: secs,
+            errors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn fdb_sync_summary() {
+        assert_eq!(
+            fdb(Some("vmbr0"), Some(4)).sync_summary(),
+            "vmbr0, synced 4s ago"
+        );
+        assert_eq!(fdb(None, None).sync_summary(), "no bridge, never synced");
     }
 }

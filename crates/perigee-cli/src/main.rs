@@ -159,9 +159,14 @@ async fn handle_sriov_cli(action: SriovAction) -> Result<()> {
                             );
                         }
                         println!(
-                            "\nFDB: {} | {} entries",
-                            detail.fdb.mode, detail.fdb.managed_entries
+                            "\nFDB: {} | {} entries | {}",
+                            detail.fdb.mode,
+                            detail.fdb.managed_entries,
+                            detail.fdb.sync_summary()
                         );
+                        for err in &detail.fdb.errors {
+                            println!("  ⚠ {}", err);
+                        }
                         return Ok(());
                     }
                     Ok(Response::Error { message }) => {

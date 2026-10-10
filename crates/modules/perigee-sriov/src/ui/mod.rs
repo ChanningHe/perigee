@@ -573,9 +573,14 @@ pub fn render_status(
         }
         lines.push(kv(
             "FDB Entries:",
-            detail.fdb.managed_entries.to_string(),
+            format!(
+                "{} ({})",
+                detail.fdb.managed_entries,
+                detail.fdb.sync_summary()
+            ),
             common::TEXT,
         ));
+        lines.extend(fdb_error_lines(&detail.fdb.errors));
 
         if !detail.vfs.is_empty() {
             lines.push(Line::from(""));
@@ -813,6 +818,16 @@ async fn fetch_fdb_entries(sriov: &mut SriovState, profile_idx: usize) {
     }
 }
 
+/// Last FDB reconcile errors, one warning line each.
+fn fdb_error_lines(errors: &[String]) -> impl Iterator<Item = Line<'static>> + '_ {
+    errors.iter().map(|e| {
+        Line::from(Span::styled(
+            format!("  ⚠ FDB: {}", e),
+            Style::default().fg(common::WARN),
+        ))
+    })
+}
+
 pub fn render_fdb_detail(
     frame: &mut Frame,
     daemon_online: bool,
@@ -841,11 +856,28 @@ pub fn render_fdb_detail(
         daemon_online,
     );
 
+    // The detail page fetched the runtime status of this same profile.
+    let fdb_status = sriov
+        .status_detail
+        .as_ref()
+        .filter(|d| d.name == profile_name)
+        .map(|d| &d.fdb);
+
     let mut lines: Vec<Line> = Vec::new();
+    let summary = fdb_status
+        .map(|f| format!(" ({})", f.sync_summary()))
+        .unwrap_or_default();
     lines.push(Line::from(Span::styled(
-        format!("  {} managed FDB entries", sriov.fdb_entries.len()),
+        format!(
+            "  {} managed FDB entries{}",
+            sriov.fdb_entries.len(),
+            summary
+        ),
         common::style_muted(),
     )));
+    if let Some(f) = fdb_status {
+        lines.extend(fdb_error_lines(&f.errors));
+    }
     lines.push(Line::from(""));
 
     if sriov.fdb_entries.is_empty() {
