@@ -102,28 +102,37 @@ pub fn reconcile(
 ) -> Reconciled {
     let mut next = OwnedMap::new();
     let mut statuses = BTreeMap::new();
+    let mut to_release: Vec<(&String, &Owned)> = Vec::new();
 
     for target in targets {
         let prev = owned.get(&target.profile);
-        let kept = match target.mode {
+        match target.mode {
             FdbMode::DaemonWatch => {
                 let (kept, status) = sync_target(host, target, prev, guests);
                 statuses.insert(target.profile.clone(), status);
-                kept
+                if let Some(o) = kept {
+                    next.insert(target.profile.clone(), o);
+                }
             }
-            FdbMode::Hookscript => None,
-            FdbMode::Disabled => prev.and_then(|p| release(host, &target.profile, p)),
-        };
-        if let Some(o) = kept {
-            next.insert(target.profile.clone(), o);
+            FdbMode::Hookscript => {}
+            FdbMode::Disabled => to_release.extend(prev.map(|p| (&target.profile, p))),
         }
     }
+    to_release.extend(
+        owned
+            .iter()
+            .filter(|(profile, _)| targets.iter().all(|t| &t.profile != *profile)),
+    );
 
-    for (profile, prev) in owned {
-        if targets.iter().all(|t| &t.profile != profile) {
-            if let Some(o) = release(host, profile, prev) {
-                next.insert(profile.clone(), o);
-            }
+    // Releases run after every sync so they can spare entries another profile
+    // now claims on the same PF (a renamed profile, two profiles on one PF).
+    let claimed: BTreeSet<(String, String)> = next
+        .values()
+        .flat_map(|o| o.macs.iter().map(|m| (o.pf_dev.clone(), m.clone())))
+        .collect();
+    for (profile, prev) in to_release {
+        if let Some(o) = release(host, profile, prev, &claimed) {
+            next.insert(profile.clone(), o);
         }
     }
 
@@ -232,11 +241,18 @@ fn sync_target(
     (kept, status)
 }
 
-/// Delete every owned entry. Returns what could not be deleted, to retry.
-fn release(host: &impl FdbHost, profile: &str, owned: &Owned) -> Option<Owned> {
+/// Delete every owned entry not `claimed` (as `(pf_dev, mac)`) by another
+/// profile. Returns what could not be deleted, to retry.
+fn release(
+    host: &impl FdbHost,
+    profile: &str,
+    owned: &Owned,
+    claimed: &BTreeSet<(String, String)>,
+) -> Option<Owned> {
     let failed: BTreeSet<String> = owned
         .macs
         .iter()
+        .filter(|mac| !claimed.contains(&(owned.pf_dev.clone(), (*mac).clone())))
         .filter(|mac| match host.del(mac, &owned.pf_dev) {
             Ok(()) => false,
             Err(e) => {
@@ -418,6 +434,22 @@ mod tests {
         assert_eq!(host.fdb(), vec![FOREIGN]);
         assert!(r.owned.is_empty());
         assert!(r.statuses.is_empty());
+    }
+
+    #[test]
+    fn renamed_profile_keeps_entries_claimed_by_its_successor() {
+        // [sriov.p] renamed to [sriov.q] on the same PF: q claims A, and the
+        // release of the vanished p must not delete it.
+        let host = FakeHost::new(&[A]);
+        let renamed = FdbTarget {
+            profile: "q".to_string(),
+            ..target(FdbMode::DaemonWatch)
+        };
+        let guests = [nic("100", A, BR)];
+        let r = reconcile(&host, &[renamed], &owned(&[A]), &guests);
+        assert_eq!(host.fdb(), vec![A]);
+        assert!(r.owned.contains_key("q"));
+        assert!(!r.owned.contains_key("p"));
     }
 
     #[test]
