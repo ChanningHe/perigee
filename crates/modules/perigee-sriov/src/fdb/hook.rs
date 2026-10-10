@@ -9,8 +9,9 @@ use std::path::Path;
 
 use super::kernel::SystemHost;
 use super::reconcile::{FdbHost, FdbTarget};
-use super::scan;
+use super::scan::{self, GuestNic};
 use crate::config::{sriov_config_path, FdbMode, SriovFileConfig};
+use crate::pve_conf;
 
 const GUEST_CONF_DIRS: [&str; 2] = ["/etc/pve/qemu-server", "/etc/pve/lxc"];
 
@@ -49,8 +50,18 @@ pub fn run_hook(vmid: &str, phase: &str) -> Result<()> {
         return Ok(());
     };
     let nics = scan::parse_nics(&content);
+    let others = match phase {
+        HookPhase::PreStart => Vec::new(),
+        // Without knowing who else runs, deleting could cut a live guest
+        // off; leaving an entry behind is harmless, so skip instead.
+        HookPhase::PostStop => scan::scan_guest_nics()
+            .context("cannot list other guests; FDB entries left in place")?
+            .into_iter()
+            .filter(|n| n.vmid != vmid && pve_conf::guest_is_running(&n.vmid))
+            .collect(),
+    };
 
-    let errors = apply_hook(&SystemHost, &targets, &nics, phase);
+    let errors = apply_hook(&SystemHost, &targets, &nics, phase, &others);
     if !errors.is_empty() {
         bail!("{}", errors.join("; "));
     }
@@ -85,12 +96,15 @@ fn read_guest_conf(vmid: &str) -> Result<Option<String>> {
 }
 
 /// Add (pre-start) or remove (post-stop) the guest's MACs on every
-/// `hookscript` target whose PF reaches the NIC's bridge. Returns the errors.
+/// `hookscript` target whose PF reaches the NIC's bridge. On post-stop a MAC
+/// that a running guest in `others` still uses behind the same PF is kept.
+/// Returns the errors.
 fn apply_hook(
     host: &impl FdbHost,
     targets: &[FdbTarget],
     nics: &[(String, String)],
     phase: HookPhase,
+    others: &[GuestNic],
 ) -> Vec<String> {
     let mut errors = Vec::new();
     for target in targets.iter().filter(|t| t.mode == FdbMode::Hookscript) {
@@ -102,9 +116,15 @@ fn apply_hook(
             }
         };
         let bridges = host.bridges_of(&pf);
+        let shared = |mac: &str| {
+            others
+                .iter()
+                .any(|o| o.mac == mac && bridges.contains(&o.bridge))
+        };
         for (mac, _) in nics.iter().filter(|(_, br)| bridges.contains(br)) {
             let result = match phase {
                 HookPhase::PreStart => host.add(mac, &pf),
+                HookPhase::PostStop if shared(mac) => Ok(()),
                 HookPhase::PostStop => host.del(mac, &pf),
             };
             if let Err(e) = result {
@@ -133,10 +153,41 @@ mod tests {
         let guest = nics(&[(A, BR), (B, "vmbr9")]);
         let targets = [target(FdbMode::Hookscript)];
 
-        assert!(apply_hook(&host, &targets, &guest, HookPhase::PreStart).is_empty());
+        assert!(apply_hook(&host, &targets, &guest, HookPhase::PreStart, &[]).is_empty());
         assert_eq!(host.fdb(), vec![A]);
 
-        assert!(apply_hook(&host, &targets, &guest, HookPhase::PostStop).is_empty());
+        assert!(apply_hook(&host, &targets, &guest, HookPhase::PostStop, &[]).is_empty());
+        assert!(host.fdb().is_empty());
+    }
+
+    #[test]
+    fn post_stop_keeps_mac_still_used_by_a_running_guest() {
+        // A clone kept its template's MAC and is still running on vmbr0.
+        let host = FakeHost::new(&[A]);
+        let targets = [target(FdbMode::Hookscript)];
+        let others = [nic("200", A, BR)];
+        apply_hook(
+            &host,
+            &targets,
+            &nics(&[(A, BR)]),
+            HookPhase::PostStop,
+            &others,
+        );
+        assert_eq!(host.fdb(), vec![A]);
+    }
+
+    #[test]
+    fn post_stop_ignores_sharers_on_unrelated_bridges() {
+        let host = FakeHost::new(&[A]);
+        let targets = [target(FdbMode::Hookscript)];
+        let others = [nic("200", A, "vmbr9")];
+        apply_hook(
+            &host,
+            &targets,
+            &nics(&[(A, BR)]),
+            HookPhase::PostStop,
+            &others,
+        );
         assert!(host.fdb().is_empty());
     }
 
@@ -144,7 +195,7 @@ mod tests {
     fn ignores_profiles_not_in_hookscript_mode() {
         let host = FakeHost::new(&[]);
         let targets = [target(FdbMode::DaemonWatch), target(FdbMode::Disabled)];
-        apply_hook(&host, &targets, &nics(&[(A, BR)]), HookPhase::PreStart);
+        apply_hook(&host, &targets, &nics(&[(A, BR)]), HookPhase::PreStart, &[]);
         assert!(host.fdb().is_empty());
     }
 
@@ -157,6 +208,7 @@ mod tests {
             &[target(FdbMode::Hookscript)],
             &nics(&[(A, BR)]),
             HookPhase::PreStart,
+            &[],
         );
         assert_eq!(errors.len(), 1);
     }

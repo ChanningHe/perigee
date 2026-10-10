@@ -1,4 +1,20 @@
-//! Minimal reader for PVE guest config files (`/etc/pve/{qemu-server,lxc}/*.conf`).
+//! Minimal readers for PVE guests: config files
+//! (`/etc/pve/{qemu-server,lxc}/*.conf`) and run state.
+
+use std::path::Path;
+
+/// Whether the VM or container `vmid` is running.
+///
+/// A VM runs when its QEMU pid file points at a live process (the pid file
+/// alone can be stale after an unclean shutdown). A container runs while its
+/// cgroup exists; PVE places it at `lxc/<vmid>` (cgroup v2, PVE 7+).
+pub fn guest_is_running(vmid: &str) -> bool {
+    let qemu_alive = std::fs::read_to_string(format!("/run/qemu-server/{vmid}.pid"))
+        .ok()
+        .and_then(|pid| pid.trim().parse::<u32>().ok())
+        .is_some_and(|pid| Path::new(&format!("/proc/{pid}")).exists());
+    qemu_alive || Path::new(&format!("/sys/fs/cgroup/lxc/{vmid}")).is_dir()
+}
 
 /// Iterate the `key: value` pairs of the live guest config, i.e. the main
 /// section only.

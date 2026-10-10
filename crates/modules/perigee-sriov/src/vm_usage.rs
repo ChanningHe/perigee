@@ -3,7 +3,6 @@
 use crate::pve_conf;
 use perigee_core::ipc::VfUser;
 use std::collections::HashMap;
-use std::path::Path;
 
 const PVE_QEMU_DIR: &str = "/etc/pve/qemu-server";
 
@@ -27,7 +26,7 @@ pub fn scan_vf_users() -> HashMap<String, VfUser> {
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let running = vm_is_running(vmid);
+        let running = pve_conf::guest_is_running(vmid);
         for addr in hostpci_addrs(&content) {
             map.entry(normalize_pci(&addr)).or_insert_with(|| VfUser {
                 vmid: vmid.to_string(),
@@ -36,19 +35,6 @@ pub fn scan_vf_users() -> HashMap<String, VfUser> {
         }
     }
     map
-}
-
-/// A VM is running when its QEMU pid file points at a live process. The pid file
-/// alone can be stale after an unclean shutdown, so the pid is validated against
-/// `/proc`.
-fn vm_is_running(vmid: &str) -> bool {
-    let Ok(pid_str) = std::fs::read_to_string(format!("/run/qemu-server/{}.pid", vmid)) else {
-        return false;
-    };
-    let Ok(pid) = pid_str.trim().parse::<u32>() else {
-        return false;
-    };
-    Path::new(&format!("/proc/{}", pid)).exists()
 }
 
 /// Extract the raw PCI addresses from a config's live `hostpci<digits>` lines
