@@ -1,17 +1,19 @@
 //! The real [`FdbHost`]: sysfs lookups plus iproute2 `bridge fdb`.
 
 use anyhow::{bail, Context, Result};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::{Command, Output};
 
-use super::reconcile::FdbHost;
+use super::reconcile::{FdbHost, PfStack};
 
 const SYS_NET: &str = "/sys/class/net";
 
 /// Upper-device hops to follow from the PF. Real stacks are at most a few
 /// deep (PF -> bond -> VLAN -> bridge -> VLAN -> bridge).
 const MAX_UPPER_DEPTH: usize = 6;
+
+const ZERO_MAC: &str = "00:00:00:00:00:00";
 
 pub struct SystemHost;
 
@@ -20,10 +22,22 @@ impl FdbHost for SystemHost {
         Ok(perigee_core::sysfs::find_iface_by_mac(pf_mac)?)
     }
 
-    fn bridges_of(&self, pf_dev: &str) -> BTreeSet<String> {
-        reachable_bridges(pf_dev, sysfs_uppers, |dev| {
-            Path::new(SYS_NET).join(dev).join("bridge").is_dir()
-        })
+    fn stack_of(&self, pf_dev: &str) -> PfStack {
+        let uppers = reachable_uppers(pf_dev, sysfs_uppers);
+        let address = |dev: &str| perigee_core::sysfs::read_iface_address(dev).ok();
+        PfStack {
+            bridges: uppers
+                .iter()
+                .filter(|dev| Path::new(SYS_NET).join(dev).join("bridge").is_dir())
+                .cloned()
+                .collect(),
+            host_macs: host_macs(
+                address(pf_dev).as_deref(),
+                uppers
+                    .iter()
+                    .filter_map(|dev| address(dev).map(|addr| (dev.clone(), addr))),
+            ),
+        }
     }
 
     fn present_macs(&self, pf_dev: &str) -> Result<BTreeSet<String>> {
@@ -48,30 +62,43 @@ impl FdbHost for SystemHost {
     }
 }
 
-/// Walk the upper-device graph from `start` and collect every Linux bridge on
-/// it. Uppers cover both the master (bridge, bond) and stacked devices (VLAN),
-/// so PF -> bond0 -> vmbr0 and PF -> PF.100 -> vmbr1 are both found; an OVS
-/// master fails `is_bridge` and is skipped. The walk continues through
-/// bridges, since a bridge's own VLAN device can be a port of another bridge
-/// (e.g. an SDN vnet on `vmbr0.100`).
-fn reachable_bridges(
-    start: &str,
-    uppers: impl Fn(&str) -> Vec<String>,
-    is_bridge: impl Fn(&str) -> bool,
-) -> BTreeSet<String> {
+/// Walk the upper-device graph from `start` and collect every device on it
+/// (excluding `start`). Uppers cover both the master (bridge, bond) and
+/// stacked devices (VLAN), so PF -> bond0 -> vmbr0 and PF -> PF.100 -> vmbr1
+/// are both found. The walk continues through bridges, since a bridge's own
+/// VLAN device can be a port of another bridge (e.g. an SDN vnet on
+/// `vmbr0.100`).
+fn reachable_uppers(start: &str, uppers: impl Fn(&str) -> Vec<String>) -> BTreeSet<String> {
     let mut seen = BTreeSet::from([start.to_string()]);
     let mut frontier = vec![start.to_string()];
-    let mut bridges = BTreeSet::new();
     for _ in 0..MAX_UPPER_DEPTH {
-        let next: Vec<String> = frontier
+        frontier = frontier
             .iter()
             .flat_map(|dev| uppers(dev))
             .filter(|up| seen.insert(up.clone()))
             .collect();
-        bridges.extend(next.iter().filter(|up| is_bridge(up)).cloned());
-        frontier = next;
     }
-    bridges
+    seen.remove(start);
+    seen
+}
+
+/// Group the `(device, address)` pairs of the PF's stacked devices by MAC,
+/// keeping only addresses that differ from the PF's own (`pf_addr`): the
+/// embedded switch already knows that one. All-zero addresses are skipped.
+fn host_macs(
+    pf_addr: Option<&str>,
+    devices: impl IntoIterator<Item = (String, String)>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let pf_addr = pf_addr.map(str::to_lowercase);
+    let mut macs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (dev, addr) in devices {
+        let addr = addr.to_lowercase();
+        if Some(&addr) == pf_addr.as_ref() || addr == ZERO_MAC {
+            continue;
+        }
+        macs.entry(addr).or_default().insert(dev);
+    }
+    macs
 }
 
 /// Upper devices of `dev`: the targets of its `upper_<name>` sysfs links.
@@ -175,9 +202,41 @@ mod tests {
                 .map(|(_, u)| u.to_string())
                 .collect()
         };
-        reachable_bridges("pf", uppers, |d| bridge_devs.contains(&d))
+        reachable_uppers("pf", uppers)
             .into_iter()
+            .filter(|d| bridge_devs.contains(&d.as_str()))
             .collect()
+    }
+
+    fn dev(name: &str, addr: &str) -> (String, String) {
+        (name.to_string(), addr.to_string())
+    }
+
+    #[test]
+    fn host_macs_skip_the_pf_own_address() {
+        // vmbr0 inherited the PF MAC (PVE 8 default); vmbr0.100 has its own.
+        let macs = host_macs(
+            Some("B8:CE:F6:00:00:01"),
+            [
+                dev("vmbr0", "b8:ce:f6:00:00:01"),
+                dev("vmbr0.100", "02:AA:BB:CC:DD:01"),
+                dev("vmbr1", "02:aa:bb:cc:dd:01"),
+                dev("dummy", "00:00:00:00:00:00"),
+            ],
+        );
+        assert_eq!(
+            macs,
+            BTreeMap::from([(
+                "02:aa:bb:cc:dd:01".to_string(),
+                ["vmbr0.100".to_string(), "vmbr1".to_string()].into()
+            )])
+        );
+    }
+
+    #[test]
+    fn host_macs_without_pf_address_keep_everything() {
+        let macs = host_macs(None, [dev("vmbr0", "b8:ce:f6:00:00:01")]);
+        assert_eq!(macs.len(), 1);
     }
 
     #[test]

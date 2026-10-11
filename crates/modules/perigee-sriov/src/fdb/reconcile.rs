@@ -17,13 +17,28 @@ use crate::config::{FdbMode, SriovProfileConfig};
 pub trait FdbHost {
     /// Interface name of the PF with this permanent MAC.
     fn resolve_pf(&self, pf_mac: &str) -> Result<String>;
-    /// Linux bridges the PF forwards into, directly or through stacked devices
-    /// (bond, VLAN). Empty when the PF is not behind any Linux bridge.
-    fn bridges_of(&self, pf_dev: &str) -> BTreeSet<String>;
+    /// Host devices stacked on the PF (bond, VLAN, bridge): see [`PfStack`].
+    fn stack_of(&self, pf_dev: &str) -> PfStack;
     /// MACs currently in the PF's own (`self`) FDB.
     fn present_macs(&self, pf_dev: &str) -> Result<BTreeSet<String>>;
     fn add(&self, mac: &str, pf_dev: &str) -> Result<()>;
     fn del(&self, mac: &str, pf_dev: &str) -> Result<()>;
+}
+
+/// Pseudo VM id marking an entry that serves the host itself.
+pub const HOST_VMID: &str = "host";
+
+/// What sits on top of a PF on the host side.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PfStack {
+    /// Linux bridges the PF forwards into, directly or through stacked
+    /// devices (bond, VLAN).
+    pub bridges: BTreeSet<String>,
+    /// MACs of the stacked devices that differ from the PF's own, mapped to
+    /// the devices carrying them. Traffic from a VF to the host (e.g. its IP
+    /// on vmbr0) targets these; the embedded switch only knows the PF's own
+    /// address, so they need FDB entries just like guest MACs.
+    pub host_macs: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// FDB entries perigee installed on one profile's PF. Only owned entries are
@@ -170,6 +185,22 @@ pub fn desired_on_bridges(
     desired
 }
 
+/// Add the host's own addresses (see [`PfStack::host_macs`]) to `desired`.
+fn with_host_macs(
+    mut desired: BTreeMap<String, FdbEntry>,
+    host_macs: &BTreeMap<String, BTreeSet<String>>,
+) -> BTreeMap<String, FdbEntry> {
+    for (mac, devices) in host_macs {
+        let entry = desired.entry(mac.clone()).or_insert_with(|| FdbEntry {
+            mac: mac.clone(),
+            ..FdbEntry::default()
+        });
+        entry.vmids.insert(HOST_VMID.to_string());
+        entry.bridges.extend(devices.iter().cloned());
+    }
+    desired
+}
+
 /// Sync one PF. When the PF or its bridge cannot be resolved, ownership is
 /// kept untouched: the NIC may be offline or mid-reconfiguration, and deleting
 /// entries then would only cause an outage once it returns.
@@ -186,8 +217,8 @@ fn sync_target(
             return (prev.cloned(), FdbStatus::failed(None, msg));
         }
     };
-    let bridges = host.bridges_of(&pf);
-    if bridges.is_empty() {
+    let PfStack { bridges, host_macs } = host.stack_of(&pf);
+    if bridges.is_empty() && host_macs.is_empty() {
         let msg = format!("PF {pf} is not behind a Linux bridge");
         return (prev.cloned(), FdbStatus::failed(Some(pf), msg));
     }
@@ -199,12 +230,12 @@ fn sync_target(
         }
     };
 
-    let desired = desired_on_bridges(guests, &bridges);
+    let desired = with_host_macs(desired_on_bridges(guests, &bridges), &host_macs);
     let prev = prev.cloned().unwrap_or_default();
     let mut errors = Vec::new();
 
-    // Desired MACs already on the PF are claimed: they belong to guests on
-    // the PF's bridges, which is exactly the domain perigee manages. This also
+    // Desired MACs already on the PF are claimed: they belong to guests or the
+    // host behind the PF, which is exactly the domain perigee manages. This also
     // adopts entries left by an older daemon run or a hookscript.
     let mut macs: BTreeSet<String> = desired
         .keys()
@@ -373,6 +404,60 @@ mod tests {
         let r = reconcile(&host, &targets, &r.owned, &[nic("100", A, BR)]);
         assert_eq!(host.fdb(), vec![A]);
         assert_eq!(r.owned, owned(&[A]));
+    }
+
+    fn with_host_mac(mut host: FakeHost, mac: &str) -> FakeHost {
+        host.host_macs = [(mac.to_string(), [BR.to_string()].into())].into();
+        host
+    }
+
+    #[test]
+    fn adds_host_mac_differing_from_the_pf() {
+        // VF -> host traffic targets vmbr0's MAC; the embedded switch must
+        // know it, or it goes out the wire and is lost.
+        let host = with_host_mac(FakeHost::new(&[]), H);
+        let r = reconcile(
+            &host,
+            &[target(FdbMode::DaemonWatch)],
+            &OwnedMap::new(),
+            &[],
+        );
+        assert_eq!(host.fdb(), vec![H]);
+        let entry = &r.statuses["p"].entries[0];
+        assert_eq!(entry.vmids, [HOST_VMID.to_string()].into());
+        assert_eq!(entry.bridges, [BR.to_string()].into());
+    }
+
+    #[test]
+    fn changed_host_mac_is_replaced_after_grace() {
+        // e.g. `hwaddress` edited on vmbr0 and `ifreload -a`.
+        let targets = [target(FdbMode::DaemonWatch)];
+        let host = with_host_mac(FakeHost::new(&[]), H);
+        let r = reconcile(&host, &targets, &OwnedMap::new(), &[]);
+
+        let host = FakeHost {
+            fdb: host.fdb,
+            ..with_host_mac(FakeHost::new(&[]), B)
+        };
+        let r = reconcile(&host, &targets, &r.owned, &[]);
+        assert_eq!(host.fdb(), vec![H, B]);
+        reconcile(&host, &targets, &r.owned, &[]);
+        assert_eq!(host.fdb(), vec![B]);
+    }
+
+    #[test]
+    fn unbridged_pf_with_host_mac_still_syncs() {
+        // Host IP on a VLAN device with its own hwaddress, no bridge at all.
+        let mut host = with_host_mac(FakeHost::new(&[]), H);
+        host.bridges.clear();
+        let r = reconcile(
+            &host,
+            &[target(FdbMode::DaemonWatch)],
+            &OwnedMap::new(),
+            &[],
+        );
+        assert_eq!(host.fdb(), vec![H]);
+        assert!(r.statuses["p"].errors.is_empty());
     }
 
     #[test]

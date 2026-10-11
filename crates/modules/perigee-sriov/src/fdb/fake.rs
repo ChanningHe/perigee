@@ -2,9 +2,9 @@
 
 use anyhow::Result;
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use super::reconcile::{FdbHost, FdbTarget};
+use super::reconcile::{FdbHost, FdbTarget, PfStack};
 use super::scan::GuestNic;
 use crate::config::FdbMode;
 
@@ -13,11 +13,14 @@ pub const PF: &str = "enp1s0f0";
 pub const BR: &str = "vmbr0";
 pub const A: &str = "52:54:00:00:00:0a";
 pub const B: &str = "52:54:00:00:00:0b";
+/// vmbr0 address differing from the PF's own.
+pub const H: &str = "02:aa:bb:cc:dd:01";
 
 /// One PF with a self FDB.
 pub struct FakeHost {
     pub fdb: RefCell<BTreeSet<String>>,
     pub bridges: BTreeSet<String>,
+    pub host_macs: BTreeMap<String, BTreeSet<String>>,
     pub pf_online: bool,
     pub failing: BTreeSet<String>,
 }
@@ -27,6 +30,7 @@ impl FakeHost {
         Self {
             fdb: RefCell::new(present.iter().map(|s| s.to_string()).collect()),
             bridges: [BR.to_string()].into(),
+            host_macs: BTreeMap::new(),
             pf_online: true,
             failing: BTreeSet::new(),
         }
@@ -55,8 +59,11 @@ impl FdbHost for FakeHost {
             anyhow::bail!("no such interface")
         }
     }
-    fn bridges_of(&self, _pf_dev: &str) -> BTreeSet<String> {
-        self.bridges.clone()
+    fn stack_of(&self, _pf_dev: &str) -> PfStack {
+        PfStack {
+            bridges: self.bridges.clone(),
+            host_macs: self.host_macs.clone(),
+        }
     }
     fn present_macs(&self, _pf_dev: &str) -> Result<BTreeSet<String>> {
         Ok(self.fdb.borrow().clone())

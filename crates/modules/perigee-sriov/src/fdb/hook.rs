@@ -8,7 +8,7 @@ use anyhow::{bail, Context, Result};
 use std::path::Path;
 
 use super::kernel::SystemHost;
-use super::reconcile::{FdbHost, FdbTarget};
+use super::reconcile::{FdbHost, FdbTarget, PfStack};
 use super::scan::{self, GuestNic};
 use crate::config::{sriov_config_path, FdbMode, SriovFileConfig};
 use crate::pve_conf;
@@ -96,9 +96,10 @@ fn read_guest_conf(vmid: &str) -> Result<Option<String>> {
 }
 
 /// Add (pre-start) or remove (post-stop) the guest's MACs on every
-/// `hookscript` target whose PF reaches the NIC's bridge. On post-stop a MAC
-/// that a running guest in `others` still uses behind the same PF is kept.
-/// Returns the errors.
+/// `hookscript` target whose PF reaches the NIC's bridge. Pre-start also
+/// installs the host's own MACs (see [`PfStack::host_macs`]), which post-stop
+/// never removes; nor does it remove a MAC that a running guest in `others`
+/// still uses behind the same PF. Returns the errors.
 fn apply_hook(
     host: &impl FdbHost,
     targets: &[FdbTarget],
@@ -115,18 +116,30 @@ fn apply_hook(
                 continue;
             }
         };
-        let bridges = host.bridges_of(&pf);
-        let shared = |mac: &str| {
-            others
-                .iter()
-                .any(|o| o.mac == mac && bridges.contains(&o.bridge))
+        let PfStack { bridges, host_macs } = host.stack_of(&pf);
+        let in_use = |mac: &str| {
+            host_macs.contains_key(mac)
+                || others
+                    .iter()
+                    .any(|o| o.mac == mac && bridges.contains(&o.bridge))
         };
-        for (mac, _) in nics.iter().filter(|(_, br)| bridges.contains(br)) {
-            let result = match phase {
-                HookPhase::PreStart => host.add(mac, &pf),
-                HookPhase::PostStop if shared(mac) => Ok(()),
-                HookPhase::PostStop => host.del(mac, &pf),
-            };
+        let guest_macs = nics
+            .iter()
+            .filter(|(_, br)| bridges.contains(br))
+            .map(|(mac, _)| mac.as_str());
+        let results: Vec<(&str, Result<()>)> = match phase {
+            HookPhase::PreStart => host_macs
+                .keys()
+                .map(String::as_str)
+                .chain(guest_macs)
+                .map(|mac| (mac, host.add(mac, &pf)))
+                .collect(),
+            HookPhase::PostStop => guest_macs
+                .filter(|mac| !in_use(mac))
+                .map(|mac| (mac, host.del(mac, &pf)))
+                .collect(),
+        };
+        for (mac, result) in results {
             if let Err(e) = result {
                 errors.push(format!("{}: {mac}: {e:#}", target.profile));
             }
@@ -158,6 +171,20 @@ mod tests {
 
         assert!(apply_hook(&host, &targets, &guest, HookPhase::PostStop, &[]).is_empty());
         assert!(host.fdb().is_empty());
+    }
+
+    #[test]
+    fn host_macs_are_added_on_start_and_kept_on_stop() {
+        let mut host = FakeHost::new(&[]);
+        host.host_macs = [(H.to_string(), [BR.to_string()].into())].into();
+        let targets = [target(FdbMode::Hookscript)];
+        let guest = nics(&[(A, BR)]);
+
+        apply_hook(&host, &targets, &guest, HookPhase::PreStart, &[]);
+        assert_eq!(host.fdb(), vec![H, A]);
+
+        apply_hook(&host, &targets, &guest, HookPhase::PostStop, &[]);
+        assert_eq!(host.fdb(), vec![H]);
     }
 
     #[test]
