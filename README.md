@@ -23,7 +23,10 @@ Proxmox VE helper toolkit - multi-module TUI for advanced configuration manageme
 
 - Automatic VF provisioning with vendor-aware drivers (Intel / Mellanox)
 - Deterministic MAC assignment strategies (sequential, hash-based, OUI-prefix)
-- FDB bridge forwarding database management
+- FDB bridge forwarding database management: installs guest NIC MACs and host
+  bridge/VLAN MACs into the PF's FDB so VFs can reach VMs, containers and the
+  host behind a Linux bridge on the PF. Not covered: hosts reached through a
+  *different* uplink of the same bridge (e.g. `bridge-ports eno1 enp1s0f0`).
 - Runtime drift detection and self-healing
 
 **Affinity** - CPU topology detection and core pinning
