@@ -1,18 +1,24 @@
-pub mod apply;
-pub mod strategy;
-pub mod topology_view;
+//! TUI for the normalized affinity planner.
+//!
+//! The UI displays the same topology, inventory and plan types used by the
+//! daemon. It contains no allocation algorithm of its own.
 
-use crossterm::event::KeyEvent;
-use ratatui::widgets::ListState;
-use std::collections::HashMap;
+use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::{
+    layout::{Constraint, Direction, Layout},
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Paragraph},
+    Frame,
+};
 use std::sync::mpsc;
 
-use crate::affinity::{self, AffinityOption, AffinityRequest, VmBinding};
-use crate::pve;
-use crate::topology::CpuTopology;
-
-type TopoResult = Result<CpuTopology, String>;
-type VmsResult = (Vec<pve::Vm>, HashMap<u32, pve::VmConfig>);
+use crate::config::AffinityFileConfig;
+use crate::inventory::{self, InventorySnapshot};
+use crate::model::{AffinityPlan, CpuTopology, ReconcileOutcome};
+use crate::planner;
+use crate::reconcile::{self, PveBackend};
+use crate::topology_adapter;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AffinityScreen {
@@ -29,48 +35,17 @@ pub enum AffinityUiAction {
     GoBack,
 }
 
+type LoadResult = Result<(CpuTopology, InventorySnapshot), String>;
+
 pub struct AffinityState {
     pub topology: Option<CpuTopology>,
-    pub topo_error: Option<String>,
-
-    pub vms: Vec<pve::Vm>,
-    pub vm_configs: HashMap<u32, pve::VmConfig>,
-    pub vm_list_state: ListState,
-
-    pub cores_input: String,
-    pub cores_needed: usize,
-    pub include_smt: bool,
-    pub editing_cores: bool,
-
-    pub strategies: Vec<AffinityOption>,
-    pub strategy_cursor: usize,
-
-    pub manual_mode: bool,
-    pub ccd_selected: Vec<bool>,
-
-    pub selected_option: Option<AffinityOption>,
-
-    // Auto-apply config mirrored from /etc/perigee/affinity.toml so the preview
-    // matches what the daemon would actually apply.
-    pub reserve_cores: usize,
-    pub exclude_vmids: Vec<u32>,
-
-    pub auto_plan: Vec<(u32, String, AffinityOption)>,
-    pub auto_results: Vec<(u32, Result<(), String>)>,
-    pub auto_executed: bool,
-    /// Scroll offset for the auto-apply allocation/results view, which grows
-    /// with the VM count.
-    pub auto_scroll: u16,
-    pub apply_result: Option<Result<(), String>>,
-
+    pub inventory: Option<InventorySnapshot>,
+    pub plan: Option<AffinityPlan>,
+    pub error: Option<String>,
     pub message: Option<String>,
-
-    pub topo_scroll: usize,
-    pub topo_max_scroll: usize,
-
-    topo_rx: Option<mpsc::Receiver<TopoResult>>,
-    vms_rx: Option<mpsc::Receiver<VmsResult>>,
-    pub data_ready: bool,
+    pub scroll: u16,
+    pub loaded: bool,
+    rx: Option<mpsc::Receiver<LoadResult>>,
 }
 
 impl Default for AffinityState {
@@ -81,245 +56,382 @@ impl Default for AffinityState {
 
 impl AffinityState {
     pub fn new() -> Self {
-        // Mirror the daemon's config so the auto-apply preview agrees with it.
-        // Missing/unreadable config falls back to defaults.
-        let cfg = crate::config::AffinityFileConfig::load(&crate::config::affinity_config_path())
-            .map(|f| f.affinity)
-            .unwrap_or_default();
         Self {
             topology: None,
-            topo_error: None,
-            vms: Vec::new(),
-            vm_configs: HashMap::new(),
-            vm_list_state: ListState::default(),
-            cores_input: "4".to_string(),
-            cores_needed: 4,
-            include_smt: cfg.include_smt,
-            editing_cores: false,
-            strategies: Vec::new(),
-            strategy_cursor: 0,
-            manual_mode: false,
-            ccd_selected: Vec::new(),
-            selected_option: None,
-            reserve_cores: cfg.reserve_cores,
-            exclude_vmids: cfg.auto_apply.exclude_vmids,
-            auto_plan: Vec::new(),
-            auto_results: Vec::new(),
-            auto_executed: false,
-            auto_scroll: 0,
-            apply_result: None,
+            inventory: None,
+            plan: None,
+            error: None,
             message: None,
-            topo_scroll: 0,
-            topo_max_scroll: 0,
-            topo_rx: None,
-            vms_rx: None,
-            data_ready: false,
+            scroll: 0,
+            loaded: false,
+            rx: None,
         }
     }
 
-    /// Kick off background loading of topology + VMs (non-blocking).
     pub fn preload(&mut self) {
-        if self.topo_rx.is_some() || self.topology.is_some() {
+        if self.rx.is_some() || self.loaded {
             return;
         }
-        let (topo_tx, topo_rx) = mpsc::channel();
-        let (vms_tx, vms_rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let result = crate::topology::detect().map_err(|e| e.to_string());
-            let _ = topo_tx.send(result);
+            let result = topology_adapter::detect()
+                .and_then(|topology| inventory::collect(&[]).map(|inventory| (topology, inventory)))
+                .map_err(|error| format!("loading affinity state: {error:#}"));
+            let _ = tx.send(result);
         });
-        std::thread::spawn(move || {
-            let vms = pve::list_vms().unwrap_or_default();
-            let mut configs = HashMap::new();
-            for vm in &vms {
-                if let Ok(cfg) = pve::read_vm_config(vm.vmid) {
-                    configs.insert(vm.vmid, cfg);
-                }
-            }
-            let _ = vms_tx.send((vms, configs));
-        });
-        self.topo_rx = Some(topo_rx);
-        self.vms_rx = Some(vms_rx);
+        self.rx = Some(rx);
     }
 
-    /// Poll background channels; returns true if new data arrived.
     pub fn poll_preload(&mut self) -> bool {
-        let mut changed = false;
-        if let Some(rx) = self.topo_rx.take() {
-            match rx.try_recv() {
-                Ok(Ok(topo)) => {
-                    let n = topo.core_groups.len();
-                    self.topology = Some(topo);
-                    self.topo_error = None;
-                    self.ccd_selected = vec![false; n];
-                    changed = true;
-                }
-                Ok(Err(e)) => {
-                    self.topo_error = Some(e);
-                    changed = true;
-                }
-                Err(mpsc::TryRecvError::Empty) => {
-                    self.topo_rx = Some(rx);
-                }
-                Err(_) => {}
-            }
-        }
-        if let Some(rx) = self.vms_rx.take() {
-            match rx.try_recv() {
-                Ok((vms, configs)) => {
-                    self.vms = vms;
-                    self.vm_configs = configs;
-                    if !self.vms.is_empty() && self.vm_list_state.selected().is_none() {
-                        self.vm_list_state.select(Some(0));
-                    }
-                    changed = true;
-                }
-                Err(mpsc::TryRecvError::Empty) => {
-                    self.vms_rx = Some(rx);
-                }
-                Err(_) => {}
-            }
-        }
-        if changed && self.topo_rx.is_none() && self.vms_rx.is_none() {
-            self.data_ready = true;
-        }
-        changed
-    }
-
-    pub fn detect_topology(&mut self) {
-        match crate::topology::detect() {
-            Ok(topo) => {
-                let n = topo.core_groups.len();
-                self.topology = Some(topo);
-                self.topo_error = None;
-                self.ccd_selected = vec![false; n];
-            }
-            Err(e) => {
-                self.topo_error = Some(e.to_string());
-                self.topology = None;
-            }
-        }
-    }
-
-    pub fn refresh_vms(&mut self) {
-        match pve::list_vms() {
-            Ok(vms) => {
-                self.vm_configs.clear();
-                for vm in &vms {
-                    if let Ok(cfg) = pve::read_vm_config(vm.vmid) {
-                        self.vm_configs.insert(vm.vmid, cfg);
-                    }
-                }
-                self.vms = vms;
-                if !self.vms.is_empty() && self.vm_list_state.selected().is_none() {
-                    self.vm_list_state.select(Some(0));
-                }
-            }
-            Err(_) => {
-                self.vms.clear();
-                self.vm_configs.clear();
-            }
-        }
-    }
-
-    pub fn existing_bindings(&self) -> Vec<VmBinding> {
-        let mut bindings = Vec::new();
-        for (vmid, cfg) in &self.vm_configs {
-            if let Some(ref aff) = cfg.affinity {
-                let cpus = affinity::parse_affinity_str(aff);
-                if !cpus.is_empty() {
-                    bindings.push(VmBinding { vmid: *vmid, cpus });
-                }
-            }
-        }
-        bindings
-    }
-
-    pub fn regenerate_strategies(&mut self) {
-        let Some(topo) = &self.topology else { return };
-        let req = AffinityRequest {
-            cores_needed: self.cores_needed,
-            include_smt: self.include_smt,
-            topology: topo.clone(),
-            existing_bindings: self.existing_bindings(),
+        let Some(rx) = self.rx.take() else {
+            return false;
         };
-        match affinity::generate(&req) {
-            Ok(opts) => {
-                self.strategies = opts;
-                if self.strategy_cursor >= self.strategies.len() {
-                    self.strategy_cursor = 0;
-                }
+        match rx.try_recv() {
+            Ok(Ok((topology, inventory))) => {
+                self.topology = Some(topology);
+                self.inventory = Some(inventory);
+                self.loaded = true;
+                self.error = None;
+                self.generate_plan();
+                true
             }
-            Err(e) => {
-                self.message = Some(format!("Generate error: {}", e));
-                self.strategies.clear();
+            Ok(Err(error)) => {
+                self.error = Some(error);
+                true
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                self.rx = Some(rx);
+                false
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.error = Some("affinity loader disconnected".to_string());
+                true
             }
         }
     }
 
-    pub fn generate_auto_plan(&mut self) {
-        let Some(topo) = &self.topology else { return };
+    pub fn refresh(&mut self) {
+        self.loaded = false;
+        self.topology = None;
+        self.inventory = None;
+        self.plan = None;
+        self.error = None;
+        self.preload();
+    }
 
-        self.auto_results.clear();
-        self.auto_executed = false;
-        self.auto_scroll = 0;
+    pub fn generate_plan(&mut self) {
+        let (Some(topology), Some(inventory)) = (&self.topology, &self.inventory) else {
+            return;
+        };
+        let config = match AffinityFileConfig::load(&crate::config::affinity_config_path()) {
+            Ok(config) => config.affinity,
+            Err(_) => Default::default(),
+        };
+        self.plan = Some(planner::plan(topology, &inventory.vms, &config.policy()));
+    }
 
-        let vm_cores: Vec<(u32, String, usize)> = self
-            .vms
-            .iter()
-            .map(|vm| {
-                let cores = self.vm_configs.get(&vm.vmid).map(|c| c.cores).unwrap_or(0);
-                (vm.vmid, vm.name.clone(), cores)
-            })
-            .collect();
+    fn apply_plan(&mut self, dry_run: bool) {
+        let Some(plan) = &self.plan else {
+            self.message = Some("No affinity plan is available".to_string());
+            return;
+        };
+        if !plan.conflicts.is_empty() {
+            self.message = Some(format!("Plan has {} conflict(s)", plan.conflicts.len()));
+            return;
+        }
+        if dry_run {
+            self.message = Some(format!(
+                "DRY RUN: {} VM(s) would change",
+                plan.assignments
+                    .iter()
+                    .filter(|assignment| assignment.changed)
+                    .count()
+            ));
+            return;
+        }
 
-        // Same planner the daemon uses, so the preview reflects reserved cores
-        // and the exclude list rather than a different allocation.
-        let plan = affinity::plan_balanced(
-            topo,
-            &vm_cores,
-            self.include_smt,
-            self.reserve_cores,
-            &self.exclude_vmids,
-        );
-        self.auto_plan = plan;
+        let config = match AffinityFileConfig::load(&crate::config::affinity_config_path()) {
+            Ok(config) => config.affinity,
+            Err(_) => Default::default(),
+        };
+        match reconcile::reconcile(
+            &PveBackend,
+            &config.policy(),
+            &config.auto_apply.exclude_vmids,
+        ) {
+            Ok(report) => {
+                self.message = Some(format_report(
+                    &report.outcome,
+                    report.changed,
+                    report.failed,
+                ));
+                self.generate_plan();
+            }
+            Err(error) => self.message = Some(format!("Apply failed: {error:#}")),
+        }
     }
 }
 
-// ── Render / input dispatch (called from perigee-cli) ──
+fn format_report(outcome: &ReconcileOutcome, changed: usize, failed: usize) -> String {
+    format!("Reconcile {outcome:?}: {changed} changed, {failed} failed")
+}
 
-pub fn render_topology(frame: &mut ratatui::Frame, daemon_online: bool, state: &mut AffinityState) {
-    topology_view::render(frame, daemon_online, state);
+pub fn render_topology(frame: &mut Frame, daemon_online: bool, state: &mut AffinityState) {
+    render(frame, daemon_online, state, "CPU Affinity");
+}
+
+pub fn render_strategy(frame: &mut Frame, daemon_online: bool, state: &AffinityState) {
+    render_plan(frame, daemon_online, state, "CPU Affinity › Plan");
+}
+
+pub fn render_apply(frame: &mut Frame, daemon_online: bool, state: &mut AffinityState) {
+    render_plan(frame, daemon_online, state, "CPU Affinity › Apply");
+}
+
+pub fn render_auto_apply(frame: &mut Frame, daemon_online: bool, state: &mut AffinityState) {
+    render_plan(frame, daemon_online, state, "CPU Affinity › Auto Apply");
+}
+
+fn render(frame: &mut Frame, daemon_online: bool, state: &mut AffinityState, title: &str) {
+    let lines = topology_lines(state);
+    render_lines(
+        frame,
+        daemon_online,
+        &mut AffinityStateView { state },
+        title,
+        lines,
+        &[
+            ("Enter", "Plan"),
+            ("a", "Auto"),
+            ("r", "Refresh"),
+            ("q", "Back"),
+        ],
+    );
+}
+
+fn render_plan(frame: &mut Frame, daemon_online: bool, state: &AffinityState, title: &str) {
+    let lines = plan_lines(state);
+    render_lines(
+        frame,
+        daemon_online,
+        &mut AffinityStateView { state },
+        title,
+        lines,
+        &[("Enter", "Apply"), ("d", "Dry Run"), ("q", "Back")],
+    );
+}
+
+struct AffinityStateView<'a> {
+    state: &'a AffinityState,
+}
+
+fn render_lines(
+    frame: &mut Frame,
+    daemon_online: bool,
+    state: &mut AffinityStateView<'_>,
+    title: &str,
+    mut lines: Vec<Line<'static>>,
+    hints: &[(&str, &str)],
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
+        .split(frame.area());
+    perigee_tui::header_bar(frame, chunks[0], title, daemon_online);
+    if let Some(message) = &state.state.message {
+        lines.push(Line::from(Span::styled(
+            message.clone(),
+            perigee_tui::style_warn(),
+        )));
+    }
+    let viewport = chunks[1].height.saturating_sub(2);
+    let scroll = state
+        .state
+        .scroll
+        .min((lines.len() as u16).saturating_sub(viewport));
+    frame.render_widget(
+        Paragraph::new(lines).scroll((scroll, 0)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(perigee_tui::BORDER)),
+        ),
+        chunks[1],
+    );
+    perigee_tui::footer_bar(frame, chunks[2], hints);
+}
+
+fn topology_lines(state: &AffinityState) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if let Some(error) = &state.error {
+        lines.push(Line::from(Span::styled(
+            error.clone(),
+            perigee_tui::style_error(),
+        )));
+        return lines;
+    }
+    let Some(topology) = &state.topology else {
+        lines.push(Line::from("Loading topology and VM inventory..."));
+        return lines;
+    };
+    lines.push(Line::from(Span::styled(
+        "── Topology ──",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(format!("Quality: {:?}", topology.quality)));
+    lines.push(Line::from(format!(
+        "Cache domain source: {:?}",
+        topology.cache_domain_source
+    )));
+    lines.push(Line::from(format!(
+        "Logical CPUs: {}",
+        topology.logical_cpus.len()
+    )));
+    lines.push(Line::from(format!(
+        "Physical cores: {}",
+        topology.physical_cores.len()
+    )));
+    lines.push(Line::from(""));
+    if let Some(inventory) = &state.inventory {
+        lines.push(Line::from(Span::styled(
+            "── VM Inventory ──",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        for vm in &inventory.vms {
+            lines.push(Line::from(format!(
+                "VM {:>5}  {:<20} {:>3} active / {:>3} max  {:?}  {:?}",
+                vm.vmid,
+                vm.name,
+                vm.cpu.active_vcpus,
+                vm.cpu.max_vcpus,
+                vm.ownership,
+                vm.current_affinity
+            )));
+        }
+        for warning in &inventory.warnings {
+            lines.push(Line::from(Span::styled(
+                format!("VM {}: {}", warning.vmid, warning.message),
+                perigee_tui::style_warn(),
+            )));
+        }
+    }
+    lines
+}
+
+fn plan_lines(state: &AffinityState) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let Some(plan) = &state.plan else {
+        lines.push(Line::from("No plan available"));
+        return lines;
+    };
+    lines.push(Line::from(Span::styled(
+        "── Desired Affinity Plan ──",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(format!(
+        "Topology quality: {:?}",
+        plan.topology_quality
+    )));
+    for assignment in &plan.assignments {
+        lines.push(Line::from(format!(
+            "VM {:>5}  {:>3} vCPU  {:<24}  {}",
+            assignment.vmid,
+            assignment.active_vcpus,
+            assignment.allowed_cpus,
+            if assignment.changed {
+                "change"
+            } else {
+                "unchanged"
+            }
+        )));
+    }
+    for warning in &plan.warnings {
+        lines.push(Line::from(Span::styled(
+            format!("Warning: {}", warning.message),
+            perigee_tui::style_warn(),
+        )));
+    }
+    for conflict in &plan.conflicts {
+        lines.push(Line::from(Span::styled(
+            format!("Conflict: {}", conflict.message),
+            perigee_tui::style_error(),
+        )));
+    }
+    lines
 }
 
 pub fn handle_topology_input(state: &mut AffinityState, key: KeyEvent) -> AffinityUiAction {
-    topology_view::handle_input(state, key)
-}
-
-pub fn render_strategy(frame: &mut ratatui::Frame, daemon_online: bool, state: &AffinityState) {
-    strategy::render(frame, daemon_online, state);
+    match key.code {
+        KeyCode::Char('q') | KeyCode::Esc => AffinityUiAction::GoBack,
+        KeyCode::Enter => {
+            state.generate_plan();
+            AffinityUiAction::NavigateTo(AffinityScreen::Strategy)
+        }
+        KeyCode::Char('a') => {
+            state.generate_plan();
+            AffinityUiAction::NavigateTo(AffinityScreen::AutoApply)
+        }
+        KeyCode::Char('r') => {
+            state.refresh();
+            AffinityUiAction::None
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            state.scroll = state.scroll.saturating_sub(1);
+            AffinityUiAction::None
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            state.scroll = state.scroll.saturating_add(1);
+            AffinityUiAction::None
+        }
+        _ => AffinityUiAction::None,
+    }
 }
 
 pub fn handle_strategy_input(state: &mut AffinityState, key: KeyEvent) -> AffinityUiAction {
-    strategy::handle_input(state, key)
-}
-
-pub fn render_apply(frame: &mut ratatui::Frame, daemon_online: bool, state: &mut AffinityState) {
-    apply::render_apply(frame, daemon_online, state);
+    match key.code {
+        KeyCode::Char('q') | KeyCode::Esc => AffinityUiAction::NavigateTo(AffinityScreen::Topology),
+        KeyCode::Enter => AffinityUiAction::NavigateTo(AffinityScreen::Apply),
+        KeyCode::Up | KeyCode::Char('k') => {
+            state.scroll = state.scroll.saturating_sub(1);
+            AffinityUiAction::None
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            state.scroll = state.scroll.saturating_add(1);
+            AffinityUiAction::None
+        }
+        _ => AffinityUiAction::None,
+    }
 }
 
 pub fn handle_apply_input(state: &mut AffinityState, key: KeyEvent) -> AffinityUiAction {
-    apply::handle_apply_input(state, key)
-}
-
-pub fn render_auto_apply(
-    frame: &mut ratatui::Frame,
-    daemon_online: bool,
-    state: &mut AffinityState,
-) {
-    apply::render_auto_apply(frame, daemon_online, state);
+    match key.code {
+        KeyCode::Char('q') | KeyCode::Esc => AffinityUiAction::NavigateTo(AffinityScreen::Strategy),
+        KeyCode::Enter => {
+            state.apply_plan(false);
+            AffinityUiAction::None
+        }
+        KeyCode::Char('d') => {
+            state.apply_plan(true);
+            AffinityUiAction::None
+        }
+        _ => AffinityUiAction::None,
+    }
 }
 
 pub fn handle_auto_apply_input(state: &mut AffinityState, key: KeyEvent) -> AffinityUiAction {
-    apply::handle_auto_apply_input(state, key)
+    match key.code {
+        KeyCode::Char('q') | KeyCode::Esc => AffinityUiAction::NavigateTo(AffinityScreen::Topology),
+        KeyCode::Enter => {
+            state.apply_plan(false);
+            AffinityUiAction::None
+        }
+        KeyCode::Char('d') => {
+            state.apply_plan(true);
+            AffinityUiAction::None
+        }
+        _ => AffinityUiAction::None,
+    }
 }

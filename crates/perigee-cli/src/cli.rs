@@ -114,14 +114,14 @@ pub enum AffinityAction {
 
     /// Generate affinity string for given core count
     Generate {
-        /// Number of cores (or vCPUs with --smt)
-        cores: usize,
+        /// Number of active vCPUs
+        vcpus: usize,
 
         /// Strategy to use
         #[arg(long, default_value = "balanced")]
         strategy: String,
 
-        /// Include SMT siblings
+        /// Prefer sibling-aware placement
         #[arg(long)]
         smt: bool,
     },
@@ -131,9 +131,9 @@ pub enum AffinityAction {
         /// Target VM ID
         vmid: u32,
 
-        /// Override core count (default: read from VM config)
+        /// Override active vCPU count (default: read from VM config)
         #[arg(long)]
-        cores: Option<usize>,
+        vcpus: Option<usize>,
 
         /// Strategy to use
         #[arg(long, default_value = "balanced")]
@@ -144,7 +144,7 @@ pub enum AffinityAction {
         dry_run: bool,
     },
 
-    /// Auto-apply balanced affinity to all VMs
+    /// Auto-apply affinity to all eligible VMs
     AutoApply {
         /// Show commands without executing
         #[arg(long)]

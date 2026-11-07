@@ -304,9 +304,8 @@ pub async fn handle_input(state: &mut AppState, key: KeyEvent) {
                 state.sriov_state.fetch_profile_statuses().await;
             }
             1 => {
-                if !state.affinity_state.data_ready {
-                    state.affinity_state.detect_topology();
-                    state.affinity_state.refresh_vms();
+                if !state.affinity_state.loaded {
+                    state.affinity_state.preload();
                 }
                 state.screen = AppScreen::AffinityTopology;
             }

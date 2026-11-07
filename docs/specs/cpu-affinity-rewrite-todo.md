@@ -125,12 +125,19 @@ This is the execution checklist for the affinity rewrite. A phase is complete on
 
 ### Phase 7 — CLI and TUI migration
 
-- [ ] Make CLI and TUI consume the same inventory, planner, plan and report types.
-- [ ] Route mutations through daemon IPC when available.
-- [ ] Keep standalone mode explicit when daemon is unavailable.
-- [ ] Remove direct planner/application duplication from UI code.
-- [ ] Update displays from physical cores/SMT conversion language to active vCPU and allowed CPU-set language.
-- [ ] Review user-facing behavior independently.
+- [x] Make CLI and TUI consume the same inventory, planner, plan and report types.
+- [x] Route mutations through daemon IPC when available.
+- [x] Keep standalone mode explicit when daemon is unavailable.
+- [x] Remove direct planner/application duplication from the migrated UI path.
+- [x] Update displays from physical cores/SMT conversion language to active vCPU and allowed CPU-set language.
+- [x] Local independent second-pass review completed; no Astra/subagent tool is available in this session.
+
+#### Phase 7 review findings
+
+- TUI now loads the normalized topology/inventory and renders the shared plan rather than maintaining a second allocation algorithm.
+- CLI generate/apply/auto-apply uses the normalized planner; mutation delegates to daemon when available.
+- A periodic daemon hook and `ReconcileAffinity` IPC request now exist.
+- The old `affinity.rs`, `topology.rs` and split UI files remain exported only as compatibility code and should be removed after the final migration audit.
 
 ### Phase 8 — Compatibility, documentation and removal
 

@@ -374,158 +374,141 @@ async fn handle_affinity_cli(action: AffinityAction) -> Result<()> {
             Ok(())
         }
         AffinityAction::Generate {
-            cores,
+            vcpus,
             strategy,
             smt,
         } => {
-            let topo = perigee_affinity::topology::detect()?;
-            let all_configs = perigee_affinity::pve::read_all_vm_configs();
-            let existing: Vec<perigee_affinity::affinity::VmBinding> = all_configs
-                .iter()
-                .filter_map(|(vmid, cfg)| {
-                    cfg.affinity
-                        .as_ref()
-                        .map(|a| perigee_affinity::affinity::VmBinding {
-                            vmid: *vmid,
-                            cpus: perigee_affinity::affinity::parse_affinity_str(a),
-                        })
-                })
-                .collect();
-
-            let req = perigee_affinity::affinity::AffinityRequest {
-                cores_needed: cores,
-                include_smt: smt,
-                topology: topo,
-                existing_bindings: existing,
+            let topology = perigee_affinity::topology_adapter::detect()?;
+            let inventory = perigee_affinity::inventory::collect(&[])?;
+            let mut policy = perigee_affinity::config::AffinityConfig::default().policy();
+            policy.smt = if smt {
+                perigee_affinity::model::SmtPolicy::PreferDistinctCores
+            } else {
+                perigee_affinity::model::SmtPolicy::LogicalOnly
             };
-            let options = perigee_affinity::affinity::generate(&req)?;
-            let strat: perigee_affinity::affinity::Strategy = strategy.parse()?;
-            let opt = options
-                .iter()
-                .find(|o| o.strategy == strat && o.available)
-                .or_else(|| options.iter().find(|o| o.available));
-            match opt {
-                Some(o) => {
-                    println!("{}", o.affinity_str);
-                }
-                None => {
-                    eprintln!("No available strategy for {} cores", cores);
-                }
+            let vm = perigee_affinity::model::VmResource {
+                vmid: 1,
+                name: "generate".to_string(),
+                status: perigee_affinity::model::VmStatus::Stopped,
+                cpu: perigee_affinity::model::VmCpuShape::from_proxmox(
+                    Some(1),
+                    None,
+                    Some(vcpus),
+                    None,
+                    false,
+                )?,
+                current_affinity: None,
+                ownership: perigee_affinity::model::VmOwnership::Managed,
+            };
+            let plan = perigee_affinity::planner::plan(&topology, &[vm], &policy);
+            if let Some(assignment) = plan.assignments.first() {
+                println!("{}", assignment.allowed_cpus);
+            } else {
+                anyhow::bail!(
+                    "no available affinity for {} vCPUs (strategy={})",
+                    vcpus,
+                    strategy
+                );
             }
+            let _ = inventory;
             Ok(())
         }
         AffinityAction::Apply {
             vmid,
-            cores,
+            vcpus,
             strategy,
             dry_run,
         } => {
-            let topo = perigee_affinity::topology::detect()?;
-            let core_count = match cores {
-                Some(c) => c,
-                None => {
-                    let cfg = perigee_affinity::pve::read_vm_config(vmid)?;
-                    if cfg.cores == 0 {
-                        anyhow::bail!("VM {} has cores=0 in config, use --cores", vmid);
+            if perigee_core::client::IpcClient::is_daemon_running() && !dry_run {
+                match perigee_core::client::IpcClient::send(
+                    &perigee_core::ipc::Request::ReconcileAffinity,
+                )
+                .await?
+                {
+                    perigee_core::ipc::Response::Ok => println!(
+                        "Affinity reconcile requested for VM {} (strategy={}).",
+                        vmid, strategy
+                    ),
+                    perigee_core::ipc::Response::Error { message } => {
+                        anyhow::bail!("affinity reconcile failed: {message}")
                     }
-                    cfg.cores
+                    _ => anyhow::bail!("unexpected daemon response"),
                 }
-            };
-
-            let all_configs = perigee_affinity::pve::read_all_vm_configs();
-            let existing: Vec<perigee_affinity::affinity::VmBinding> = all_configs
+                return Ok(());
+            }
+            let topology = perigee_affinity::topology_adapter::detect()?;
+            let inventory = perigee_affinity::inventory::collect(&[])?;
+            let vm = inventory
+                .vms
                 .iter()
-                .filter_map(|(vid, cfg)| {
-                    if *vid == vmid {
-                        return None;
-                    }
-                    cfg.affinity
-                        .as_ref()
-                        .map(|a| perigee_affinity::affinity::VmBinding {
-                            vmid: *vid,
-                            cpus: perigee_affinity::affinity::parse_affinity_str(a),
-                        })
-                })
-                .collect();
-
-            let req = perigee_affinity::affinity::AffinityRequest {
-                cores_needed: core_count,
-                include_smt: true,
-                topology: topo,
-                existing_bindings: existing,
-            };
-            let options = perigee_affinity::affinity::generate(&req)?;
-            let strat: perigee_affinity::affinity::Strategy = strategy.parse()?;
-            let opt = options
-                .iter()
-                .find(|o| o.strategy == strat && o.available)
-                .or_else(|| options.iter().find(|o| o.available));
-
-            match opt {
-                Some(o) => {
-                    println!("qm set {} --affinity {}", vmid, o.affinity_str);
-                    if !dry_run {
-                        perigee_affinity::pve::set_affinity(vmid, &o.affinity_str, false)?;
-                        println!("Applied.");
-                    }
-                }
-                None => {
-                    eprintln!("No available strategy for {} cores", core_count);
-                }
+                .find(|vm| vm.vmid == vmid)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("VM {} not found", vmid))?;
+            let requested = vcpus.unwrap_or(vm.cpu.active_vcpus);
+            let mut vm = vm;
+            vm.cpu = perigee_affinity::model::VmCpuShape::from_proxmox(
+                Some(1),
+                None,
+                Some(requested),
+                None,
+                false,
+            )?;
+            let plan = perigee_affinity::planner::plan(
+                &topology,
+                &[vm],
+                &perigee_affinity::config::AffinityConfig::default().policy(),
+            );
+            let assignment = plan
+                .assignments
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("no available affinity for VM {}", vmid))?;
+            println!("qm set {} --affinity {}", vmid, assignment.allowed_cpus);
+            if !dry_run {
+                perigee_affinity::pve::set_affinity(
+                    vmid,
+                    &assignment.allowed_cpus.to_range_string(),
+                    false,
+                )?;
+                println!("Applied.");
             }
             Ok(())
         }
         AffinityAction::AutoApply { dry_run } => {
-            let topo = perigee_affinity::topology::detect()?;
-            let vms = perigee_affinity::pve::list_vms()?;
-            let mut vm_entries: Vec<(u32, String, usize)> = Vec::new();
-            for vm in &vms {
-                let cfg = perigee_affinity::pve::read_vm_config(vm.vmid).unwrap_or_default();
-                if cfg.cores > 0 {
-                    vm_entries.push((vm.vmid, vm.name.clone(), cfg.cores));
-                }
-            }
-            vm_entries.sort_by_key(|e| std::cmp::Reverse(e.2));
-
-            let mut bindings: Vec<perigee_affinity::affinity::VmBinding> = Vec::new();
-            for (vmid, name, cores) in &vm_entries {
-                let req = perigee_affinity::affinity::AffinityRequest {
-                    cores_needed: *cores,
-                    include_smt: true,
-                    topology: topo.clone(),
-                    existing_bindings: bindings.clone(),
-                };
-                let Ok(options) = perigee_affinity::affinity::generate(&req) else {
-                    eprintln!("VM {} ({}): no options", vmid, name);
-                    continue;
-                };
-                let opt = options
-                    .iter()
-                    .find(|o| {
-                        o.strategy == perigee_affinity::affinity::Strategy::Balanced && o.available
-                    })
-                    .or_else(|| options.iter().find(|o| o.available));
-
-                if let Some(o) = opt {
-                    println!(
-                        "VM {} ({}): qm set {} --affinity {}",
-                        vmid, name, vmid, o.affinity_str
-                    );
-                    if !dry_run {
-                        match perigee_affinity::pve::set_affinity(*vmid, &o.affinity_str, false) {
-                            Ok(()) => println!("  ✓ Applied"),
-                            Err(e) => eprintln!("  ✗ {}", e),
-                        }
+            if perigee_core::client::IpcClient::is_daemon_running() && !dry_run {
+                match perigee_core::client::IpcClient::send(
+                    &perigee_core::ipc::Request::ReconcileAffinity,
+                )
+                .await?
+                {
+                    perigee_core::ipc::Response::Ok => println!("Affinity reconcile requested."),
+                    perigee_core::ipc::Response::Error { message } => {
+                        anyhow::bail!("affinity reconcile failed: {message}")
                     }
-                    bindings.push(perigee_affinity::affinity::VmBinding {
-                        vmid: *vmid,
-                        cpus: o.cpus.clone(),
-                    });
-                } else {
-                    eprintln!(
-                        "VM {} ({}): no available strategy for {} cores",
-                        vmid, name, cores
-                    );
+                    _ => anyhow::bail!("unexpected daemon response"),
+                }
+                return Ok(());
+            }
+            let topology = perigee_affinity::topology_adapter::detect()?;
+            let inventory = perigee_affinity::inventory::collect(&[])?;
+            let plan = perigee_affinity::planner::plan(
+                &topology,
+                &inventory.vms,
+                &perigee_affinity::config::AffinityConfig::default().policy(),
+            );
+            if !plan.conflicts.is_empty() {
+                anyhow::bail!("affinity plan has {} conflict(s)", plan.conflicts.len());
+            }
+            for assignment in &plan.assignments {
+                println!(
+                    "VM {}: qm set {} --affinity {}",
+                    assignment.vmid, assignment.vmid, assignment.allowed_cpus
+                );
+                if !dry_run {
+                    perigee_affinity::pve::set_affinity(
+                        assignment.vmid,
+                        &assignment.allowed_cpus.to_range_string(),
+                        false,
+                    )?;
                 }
             }
             Ok(())
