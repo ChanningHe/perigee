@@ -32,9 +32,10 @@ Proxmox VE helper toolkit - multi-module TUI for advanced configuration manageme
 **Affinity** - CPU topology detection and core pinning
 
 - Hardware topology detection (NUMA, L3 cache, SMT)
-- Multi-strategy affinity generation (balanced, packed, spread)
-- Automatically apply optimal CPU bindings (e.g., AMD EPYC) to all VMs
-- Conflict-free allocation across existing VMs
+- Deterministic active-vCPU affinity planning
+- Topology-aware placement with explicit degraded-mode handling
+- Automatically reconcile all eligible VMs when enabled, with `exclude_vmids` exceptions
+- Conflict-aware allocation across existing external VM bindings
 
 ## Installation
 
@@ -81,7 +82,7 @@ perigee sriov show <name>  # Show profile details
 # Affinity module
 perigee affinity           # Interactive TUI
 perigee affinity topology  # Show CPU topology
-perigee affinity generate <cores>  # Generate affinity string
+perigee affinity generate <vcpus>  # Generate affinity string
 
 # Daemon management
 perigee status             # Query status

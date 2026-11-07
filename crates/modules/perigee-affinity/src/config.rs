@@ -2,7 +2,59 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::affinity::Strategy;
+use serde::de::Error as _;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Strategy {
+    SingleCcd,
+    Balanced,
+    Manual,
+    PCoresOnly,
+    ECoresOnly,
+    AllCores,
+}
+
+impl std::str::FromStr for Strategy {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "single-ccd" => Ok(Self::SingleCcd),
+            "balanced" => Ok(Self::Balanced),
+            "manual" => Ok(Self::Manual),
+            "p-cores-only" => Ok(Self::PCoresOnly),
+            "e-cores-only" => Ok(Self::ECoresOnly),
+            "all-cores" => Ok(Self::AllCores),
+            _ => anyhow::bail!("unknown strategy: {value}"),
+        }
+    }
+}
+
+impl serde::Serialize for Strategy {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(match self {
+            Self::SingleCcd => "single-ccd",
+            Self::Balanced => "balanced",
+            Self::Manual => "manual",
+            Self::PCoresOnly => "p-cores-only",
+            Self::ECoresOnly => "e-cores-only",
+            Self::AllCores => "all-cores",
+        })
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Strategy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(D::Error::custom)
+    }
+}
 use crate::model::{
     AffinityPolicy, AllocationPolicy, CorePreference, CpuSet, LocalityPolicy, OvercommitPolicy,
     SmtPolicy,
@@ -149,6 +201,6 @@ mod tests {
         let error =
             toml::from_str::<AffinityFileConfig>("[affinity]\nstrategy = 'not-a-strategy'\n")
                 .unwrap_err();
-        assert!(error.to_string().contains("unknown variant"));
+        assert!(error.to_string().contains("unknown strategy"));
     }
 }

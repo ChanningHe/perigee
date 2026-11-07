@@ -342,33 +342,16 @@ fn generate_fdb_hookscripts() -> Result<()> {
 async fn handle_affinity_cli(action: AffinityAction) -> Result<()> {
     match action {
         AffinityAction::Topology { json } => {
-            let topo = perigee_affinity::topology::detect()?;
+            let topology = perigee_affinity::topology_adapter::detect()?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&topo)?);
+                println!("{}", serde_json::to_string_pretty(&topology)?);
             } else {
-                println!(
-                    "Architecture: {} ({})",
-                    topo.architecture, topo.detect_method
-                );
-                println!(
-                    "CPUs: {} logical / {} physical / SMT {}",
-                    topo.total_cpus,
-                    topo.total_cores,
-                    if topo.has_smt { "yes" } else { "no" }
-                );
-                println!("Packages: {}\n", topo.packages.len());
-                for pkg in &topo.packages {
-                    println!("Package {}:", pkg.id);
-                    for cg in &pkg.core_groups {
-                        println!(
-                            "  {:<8} L3#{:<4} {}C/{}T  {}",
-                            cg.name,
-                            cg.l3_cache_id,
-                            cg.physical_cpus.len(),
-                            cg.all_cpus.len(),
-                            perigee_affinity::affinity::format_cpus(&cg.all_cpus),
-                        );
-                    }
+                println!("Quality: {:?}", topology.quality);
+                println!("Cache domain source: {:?}", topology.cache_domain_source);
+                println!("Logical CPUs: {}", topology.logical_cpus.len());
+                println!("Physical cores: {}", topology.physical_cores.len());
+                for core in &topology.physical_cores {
+                    println!("  core {:?}: {}", core.id, core.threads);
                 }
             }
             Ok(())

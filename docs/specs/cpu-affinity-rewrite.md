@@ -74,6 +74,22 @@ Automatic mode partitions VMs into:
 
 A managed VM's current affinity may be preserved when it remains valid, but it can be replaced when policy or resource constraints require it.
 
+## Configuration Example
+
+```toml
+[affinity]
+enabled = true
+strategy = "balanced"
+include_smt = true
+reserved_cpus = [0, 1]
+
+[affinity.auto_apply]
+enabled = true
+exclude_vmids = [102]
+```
+
+When automatic mode is enabled, every eligible VM except the excluded IDs is managed. Excluded VM affinity is preserved and treated as external occupied capacity.
+
 ## Edge Cases
 
 - A VM with `vcpus` greater than `sockets * cores` is invalid and is skipped with an error; it must not be clamped silently.

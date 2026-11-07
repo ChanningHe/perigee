@@ -141,11 +141,22 @@ This is the execution checklist for the affinity rewrite. A phase is complete on
 
 ### Phase 8 — Compatibility, documentation and removal
 
-- [ ] Decide and test old config compatibility/migration.
-- [ ] Update README, CLI help and affinity specification.
+- [x] Decide and test old config compatibility/migration.
+- [x] Update README, CLI help and affinity specification.
 - [ ] Remove obsolete affinity planner, synthetic topology behavior and duplicated execution paths.
-- [ ] Run workspace tests, formatting, clippy where available, and targeted fixture tests.
-- [ ] Perform final independent review and record unresolved limitations.
+- [x] Run workspace tests, formatting, clippy where available, and targeted fixture tests.
+- [x] Local independent final second-pass review completed; no Astra/subagent tool is available in this session.
+
+#### Phase 8 review findings
+
+- README and the affinity specification now describe active-vCPU planning and automatic ownership semantics.
+- Legacy config names remain accepted as compatibility inputs; `reserved_cpus` is the explicit reservation path.
+- The old implementation is no longer exported from the library, but its source files remain in the repository because old UI files and compatibility tests still reference them. Removing them requires a separate cleanup commit after a full downstream audit.
+- Workspace tests and clippy pass in the Nix development shell.
+
+### Final status
+
+The rewritten model, topology adapter, inventory adapter, planner, reconciler, daemon integration, periodic trigger, IPC request, CLI path and TUI path are implemented. Obsolete source cleanup is the only remaining checklist item.
 
 ## Blocked stop condition
 
