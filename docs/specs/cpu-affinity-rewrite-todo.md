@@ -143,7 +143,7 @@ This is the execution checklist for the affinity rewrite. A phase is complete on
 
 - [x] Decide and test old config compatibility/migration.
 - [x] Update README, CLI help and affinity specification.
-- [ ] Remove obsolete affinity planner, synthetic topology behavior and duplicated execution paths.
+- [x] Remove obsolete affinity planner, synthetic topology behavior and duplicated execution paths.
 - [x] Run workspace tests, formatting, clippy where available, and targeted fixture tests.
 - [x] Local independent final second-pass review completed; no Astra/subagent tool is available in this session.
 
@@ -156,7 +156,7 @@ This is the execution checklist for the affinity rewrite. A phase is complete on
 
 ### Final status
 
-The rewritten model, topology adapter, inventory adapter, planner, reconciler, daemon integration, periodic trigger, IPC request, CLI path and TUI path are implemented. Obsolete source cleanup is the only remaining checklist item.
+The rewritten model, topology adapter, inventory adapter, planner, reconciler, daemon integration, periodic trigger, IPC request, CLI path and TUI path are implemented. Obsolete source cleanup is complete.
 
 ## Blocked stop condition
 
