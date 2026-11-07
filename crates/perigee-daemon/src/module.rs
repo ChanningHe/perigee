@@ -23,6 +23,10 @@ pub trait Module: Send + Sync {
     }
     async fn init(&mut self, config: &toml::Value) -> anyhow::Result<()>;
     async fn apply(&mut self) -> anyhow::Result<()>;
+    /// Periodic self-healing hook. Modules opt in; the default is a no-op.
+    async fn periodic(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
     async fn reload(&mut self, config: &toml::Value) -> anyhow::Result<()>;
     async fn shutdown(&self) -> anyhow::Result<()>;
     fn status(&self) -> ModuleStatus;

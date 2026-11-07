@@ -110,6 +110,10 @@ impl perigee_daemon::module::Module for AffinityModule {
         Ok(())
     }
 
+    async fn periodic(&mut self) -> anyhow::Result<()> {
+        self.apply().await
+    }
+
     async fn reload(&mut self, config: &toml::Value) -> anyhow::Result<()> {
         self.config = Self::load_config(config)?;
         self.detect_topology()?;

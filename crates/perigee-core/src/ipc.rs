@@ -15,6 +15,7 @@ pub enum Request {
     FdbEntries { profile: String },
     Apply { profile: String },
     RetryFailed { profile: String },
+    ReconcileAffinity,
 }
 
 // ── Response ──

@@ -160,6 +160,21 @@ async fn process_request(
                 }
             }
         }
+        Request::ReconcileAffinity => {
+            let mut reg = registry.lock().await;
+            if let Some(module) = reg.get_mut("affinity") {
+                match tokio::task::block_in_place(|| module.apply()).await {
+                    Ok(()) => Response::Ok,
+                    Err(e) => Response::Error {
+                        message: format!("affinity reconcile failed: {e}"),
+                    },
+                }
+            } else {
+                Response::Error {
+                    message: "affinity module not loaded".to_string(),
+                }
+            }
+        }
         Request::RetryFailed { profile } => {
             let mut reg = registry.lock().await;
             if let Some(module) = reg.get_mut("sriov") {

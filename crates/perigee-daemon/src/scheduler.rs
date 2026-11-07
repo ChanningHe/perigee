@@ -14,6 +14,7 @@ const PVE_MOUNTPOINT: &str = "/etc/pve";
 const PMXCFS_READY_PATH: &str = "/etc/pve/local";
 const PMXCFS_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const PMXCFS_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
+const PERIODIC_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Reload configuration and propagate it to every module. Shared by the IPC
 /// `Reload` request and the SIGHUP handler so the two cannot diverge.
@@ -148,8 +149,18 @@ pub async fn run_daemon(
 
     // Wait for a terminating signal, reloading in place on SIGHUP.
     let mut ipc_handle = ipc_handle;
+    let mut periodic = tokio::time::interval(PERIODIC_RECONCILE_INTERVAL);
+    periodic.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
+            _ = periodic.tick() => {
+                let mut reg = registry.lock().await;
+                for module in reg.all_mut() {
+                    if let Err(e) = module.periodic().await {
+                        error!(module = module.name(), error = %e, "periodic module reconcile failed");
+                    }
+                }
+            }
             _ = &mut ipc_handle => break,
             _ = tokio::signal::ctrl_c() => {
                 info!("received SIGINT, shutting down");
