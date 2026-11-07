@@ -35,11 +35,19 @@ This is the execution checklist for the affinity rewrite. A phase is complete on
 
 ### Phase 2 — Topology adapter
 
-- [ ] Replace synthetic CCD fallback with explicit cache-domain/source/quality data.
-- [ ] Read logical CPUs, physical-core identity, siblings, package, NUMA and cache data where available.
-- [ ] Preserve unknown facts as unknown; never infer P/E from SMT shape.
-- [ ] Add fixture-driven topology tests for AMD-like SMT, Intel hybrid, generic, multi-socket, and incomplete sysfs data.
-- [ ] Review topology behavior independently.
+- [x] Replace synthetic CCD fallback with explicit cache-domain/source/quality data.
+- [x] Read logical CPUs, physical-core identity, siblings, package, NUMA and cache data where available.
+- [x] Preserve unknown facts as unknown; never infer P/E from SMT shape.
+- [x] Add fixture-driven topology tests for AMD-like SMT, Intel hybrid, generic, multi-socket, and incomplete sysfs data.
+- [x] Local independent second-pass review completed; no Astra/subagent tool is available in this session.
+
+#### Phase 2 review findings
+
+- The new adapter reads only sysfs facts and does not use `core_id / 8` or sibling-count P/E inference.
+- Missing physical identity produces `LogicalOnly`; missing sibling data produces `Partial` without fabricating sibling relationships.
+- Cache-domain source is explicit and deterministic; L3, cluster, die, NUMA and package fallback are distinguishable.
+- The legacy topology module remains untouched as a migration boundary for the old UI/planner.
+- The new adapter is not yet wired into daemon/TUI; that is intentional until the inventory and planner consume the normalized model.
 
 ### Phase 3 — Proxmox inventory adapter
 

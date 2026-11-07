@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
 
+const MAX_LOGICAL_CPUS: usize = 8192;
+
 /// A normalized, sorted, duplicate-free set of logical host CPU IDs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -27,6 +29,27 @@ impl CpuSet {
 
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    /// Parse the comma/range syntax accepted by Proxmox affinity settings.
+    pub fn parse(value: &str) -> Result<Self, CpuSetParseError> {
+        let mut cpus = Vec::new();
+        for part in value.split(',').map(str::trim) {
+            if part.is_empty() {
+                return Err(CpuSetParseError::EmptyPart);
+            }
+            if let Some((start, end)) = part.split_once('-') {
+                let start = parse_cpu_id(start)?;
+                let end = parse_cpu_id(end)?;
+                if start > end {
+                    return Err(CpuSetParseError::InvertedRange { start, end });
+                }
+                cpus.extend(start..=end);
+            } else {
+                cpus.push(parse_cpu_id(part)?);
+            }
+        }
+        Ok(Self::new(cpus))
     }
 
     pub fn len(&self) -> usize {
@@ -75,6 +98,29 @@ impl CpuSet {
         ranges.push(format_range(start, end));
         ranges.join(",")
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum CpuSetParseError {
+    #[error("affinity contains an empty item")]
+    EmptyPart,
+    #[error("invalid CPU id '{0}'")]
+    InvalidCpu(String),
+    #[error("CPU id {0} exceeds supported limit {MAX_LOGICAL_CPUS}")]
+    CpuOutOfRange(usize),
+    #[error("affinity range {start}-{end} is inverted")]
+    InvertedRange { start: usize, end: usize },
+}
+
+fn parse_cpu_id(value: &str) -> Result<usize, CpuSetParseError> {
+    let id = value
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| CpuSetParseError::InvalidCpu(value.trim().to_string()))?;
+    if id >= MAX_LOGICAL_CPUS {
+        return Err(CpuSetParseError::CpuOutOfRange(id));
+    }
+    Ok(id)
 }
 
 impl From<Vec<usize>> for CpuSet {
@@ -429,6 +475,23 @@ mod tests {
     #[test]
     fn empty_cpu_set_formats_as_empty_string() {
         assert_eq!(CpuSet::empty().to_range_string(), "");
+    }
+
+    #[test]
+    fn cpu_set_parser_rejects_malformed_ranges() {
+        assert_eq!(CpuSet::parse("0-3,8").unwrap().as_slice(), &[0, 1, 2, 3, 8]);
+        assert!(matches!(
+            CpuSet::parse("8-4"),
+            Err(CpuSetParseError::InvertedRange { .. })
+        ));
+        assert!(matches!(
+            CpuSet::parse("0-8192"),
+            Err(CpuSetParseError::CpuOutOfRange(8192))
+        ));
+        assert!(matches!(
+            CpuSet::parse("0,,2"),
+            Err(CpuSetParseError::EmptyPart)
+        ));
     }
 
     #[test]

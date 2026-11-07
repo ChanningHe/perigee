@@ -4,6 +4,7 @@ pub mod daemon;
 pub mod model;
 pub mod pve;
 pub mod topology;
+pub mod topology_adapter;
 pub mod ui;
 
 pub fn module_info() -> (&'static str, &'static str) {
