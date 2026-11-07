@@ -2,15 +2,15 @@ use async_trait::async_trait;
 use perigee_core::ipc::{ModuleState, ModuleStatus};
 use tracing::{error, info, warn};
 
-use crate::affinity;
-use crate::config::{AffinityConfig, AffinityFileConfig};
-use crate::pve;
-use crate::topology::{self, CpuTopology};
+use crate::config::AffinityConfig;
+use crate::model::{ReconcileOutcome, ReconcileReport};
+use crate::reconcile::{self, PveBackend};
+use crate::topology_adapter;
 
 pub struct AffinityModule {
     config: AffinityConfig,
-    topology: Option<CpuTopology>,
-    applied_count: usize,
+    last_report: Option<ReconcileReport>,
+    topology_quality: Option<crate::model::TopologyQuality>,
     last_error: Option<String>,
 }
 
@@ -24,74 +24,42 @@ impl AffinityModule {
     pub fn new() -> Self {
         Self {
             config: AffinityConfig::default(),
-            topology: None,
-            applied_count: 0,
+            last_report: None,
+            topology_quality: None,
             last_error: None,
         }
     }
 
-    fn detect_topology(&mut self) {
-        match topology::detect() {
-            Ok(topo) => {
-                info!(
-                    arch = %topo.architecture,
-                    method = %topo.detect_method,
-                    cores = topo.total_cores,
-                    ccds = topo.core_groups.len(),
-                    "CPU topology detected"
-                );
-                self.topology = Some(topo);
-            }
-            Err(e) => {
-                warn!("CPU topology detection failed: {}", e);
-                self.topology = None;
-            }
-        }
+    fn detect_topology(&mut self) -> anyhow::Result<()> {
+        let topology = topology_adapter::detect()?;
+        info!(
+            quality = ?topology.quality,
+            cache_source = ?topology.cache_domain_source,
+            logical_cpus = topology.logical_cpus.len(),
+            physical_cores = topology.physical_cores.len(),
+            "normalized CPU topology detected"
+        );
+        self.topology_quality = Some(topology.quality);
+        Ok(())
     }
 
-    fn auto_apply_all(&mut self) -> anyhow::Result<()> {
-        let topo = match &self.topology {
-            Some(t) => t.clone(),
-            None => {
-                anyhow::bail!("no topology available");
-            }
-        };
-
-        let vms = pve::list_vms()?;
-        // Collect (vmid, name, cores) for every VM; plan_balanced filters out
-        // excluded / 0-core VMs and reserves host cores, identically to the TUI
-        // preview so the two never disagree.
-        let mut vm_cores: Vec<(u32, String, usize)> = Vec::new();
-        for vm in &vms {
-            let cfg = pve::read_vm_config(vm.vmid).unwrap_or_default();
-            vm_cores.push((vm.vmid, vm.name.clone(), cfg.cores));
-        }
-
-        let plan = affinity::plan_balanced(
-            &topo,
-            &vm_cores,
-            self.config.include_smt,
-            self.config.reserve_cores,
+    fn reconcile_once(&mut self) -> anyhow::Result<ReconcileReport> {
+        let backend = PveBackend;
+        let report = reconcile::reconcile(
+            &backend,
+            &self.config.policy(),
             &self.config.auto_apply.exclude_vmids,
-        );
+        )?;
+        self.last_report = Some(report.clone());
+        Ok(report)
+    }
 
-        let total = plan.len();
-        let mut applied = 0;
-        for (vmid, name, option) in &plan {
-            match pve::set_affinity(*vmid, &option.affinity_str, false) {
-                Ok(()) => {
-                    info!(vmid, name, affinity = %option.affinity_str, "applied CPU affinity");
-                    applied += 1;
-                }
-                Err(e) => {
-                    error!(vmid, name, "failed to apply affinity: {}", e);
-                }
-            }
-        }
-
-        self.applied_count = applied;
-        info!(applied, total, "auto-apply complete");
-        Ok(())
+    fn load_config(config: &toml::Value) -> anyhow::Result<AffinityConfig> {
+        let Some(affinity) = config.get("affinity") else {
+            return Ok(AffinityConfig::default());
+        };
+        let typed: AffinityConfig = affinity.clone().try_into()?;
+        Ok(typed)
     }
 }
 
@@ -102,64 +70,52 @@ impl perigee_daemon::module::Module for AffinityModule {
     }
 
     async fn init(&mut self, config: &toml::Value) -> anyhow::Result<()> {
-        if let Some(aff_val) = config.get("affinity") {
-            let aff_str = toml::to_string(aff_val)?;
-            let parsed: AffinityFileConfig =
-                toml::from_str(&format!("[affinity]\n{}", aff_str)).unwrap_or_default();
-            self.config = parsed.affinity;
-        } else {
-            let path = crate::config::affinity_config_path();
-            if path.exists() {
-                if let Ok(cfg) = AffinityFileConfig::load(&path) {
-                    self.config = cfg.affinity;
-                }
-            }
-        }
-
-        self.detect_topology();
+        self.config = Self::load_config(config)?;
+        self.detect_topology().map_err(|error| {
+            warn!(%error, "CPU topology detection failed during affinity init");
+            error
+        })?;
         Ok(())
     }
 
     async fn apply(&mut self) -> anyhow::Result<()> {
-        if !self.config.enabled {
-            return Ok(());
-        }
-        if !self.config.auto_apply.enabled {
+        if !self.config.enabled || !self.config.auto_apply.enabled {
             return Ok(());
         }
 
-        if self.topology.is_none() {
-            self.detect_topology();
-        }
-
-        match self.auto_apply_all() {
-            Ok(()) => {
+        let report = tokio::task::block_in_place(|| self.reconcile_once())?;
+        match report.outcome {
+            ReconcileOutcome::Healthy => {
                 self.last_error = None;
+                info!(
+                    planned = report.planned,
+                    changed = report.changed,
+                    unchanged = report.unchanged,
+                    "affinity reconcile complete"
+                );
             }
-            Err(e) => {
-                let msg = e.to_string();
-                error!("affinity auto-apply failed: {}", msg);
-                self.last_error = Some(msg);
+            ReconcileOutcome::Degraded => {
+                self.last_error = Some(report.warnings.join("; "));
+                warn!(
+                    failed = report.failed,
+                    warnings = report.warnings.len(),
+                    "affinity reconcile degraded"
+                );
+            }
+            ReconcileOutcome::Failed => {
+                self.last_error = Some(report.warnings.join("; "));
+                error!(failed = report.failed, "affinity reconcile failed");
             }
         }
         Ok(())
     }
 
     async fn reload(&mut self, config: &toml::Value) -> anyhow::Result<()> {
-        if let Some(aff_val) = config.get("affinity") {
-            let aff_str = toml::to_string(aff_val)?;
-            let parsed: AffinityFileConfig =
-                toml::from_str(&format!("[affinity]\n{}", aff_str)).unwrap_or_default();
-            self.config = parsed.affinity;
-        } else {
-            let path = crate::config::affinity_config_path();
-            if path.exists() {
-                if let Ok(cfg) = AffinityFileConfig::load(&path) {
-                    self.config = cfg.affinity;
-                }
-            }
+        self.config = Self::load_config(config)?;
+        self.detect_topology()?;
+        if self.config.enabled && self.config.auto_apply.enabled {
+            self.apply().await?;
         }
-        self.detect_topology();
         Ok(())
     }
 
@@ -171,6 +127,11 @@ impl perigee_daemon::module::Module for AffinityModule {
         let state = if !self.config.enabled {
             ModuleState::Stopped
         } else if self.last_error.is_some() {
+            ModuleState::Degraded
+        } else if matches!(
+            self.topology_quality,
+            Some(crate::model::TopologyQuality::Invalid)
+        ) {
             ModuleState::Error
         } else {
             ModuleState::Running

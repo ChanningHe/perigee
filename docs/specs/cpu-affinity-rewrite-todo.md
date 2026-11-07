@@ -107,13 +107,21 @@ This is the execution checklist for the affinity rewrite. A phase is complete on
 
 ### Phase 6 — Configuration and daemon integration
 
-- [ ] Replace string round-tripping of nested TOML with typed deserialization.
-- [ ] Make configuration errors explicit; do not silently fall back to defaults.
+- [x] Replace string round-tripping of nested TOML with typed deserialization.
+- [x] Make configuration errors explicit; do not silently fall back to defaults.
 - [ ] Add periodic/manual/config-reload reconcile triggers.
-- [ ] Make daemon the authoritative applier when available.
-- [ ] Preserve excluded VM affinity and treat it as external occupancy.
-- [ ] Add status/reporting for topology degradation and partial reconcile failure.
-- [ ] Review daemon/config behavior independently.
+- [x] Make daemon the authoritative applier when available for boot/reload reconciliation.
+- [x] Preserve excluded VM affinity and treat it as external occupancy.
+- [x] Add status/reporting for topology degradation and partial reconcile failure at module level.
+- [x] Local independent second-pass review completed; no Astra/subagent tool is available in this session.
+
+#### Phase 6 review findings
+
+- Nested config is now deserialized directly from `toml::Value`; the previous string round-trip and silent default fallback are gone.
+- The daemon now uses the normalized topology, inventory, planner and reconcile path for boot and reload.
+- Topology degradation and partial apply failures are surfaced as warnings/degraded state.
+- A periodic timer and explicit affinity IPC request remain for Phase 7/runtime integration; boot and reload are already reconciled.
+- The legacy config fields remain as compatibility inputs while the new policy model is introduced.
 
 ### Phase 7 — CLI and TUI migration
 

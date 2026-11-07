@@ -423,6 +423,8 @@ pub struct PlanConflict {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AffinityPlan {
     pub topology_fingerprint: String,
+    pub topology_quality: TopologyQuality,
+    pub topology_warning: Option<String>,
     pub assignments: Vec<VmAffinityAssignment>,
     pub reserved_cpus: CpuSet,
     pub external_occupied_cpus: CpuSet,
@@ -437,6 +439,12 @@ pub enum ReconcileOutcome {
     Healthy,
     Degraded,
     Failed,
+}
+
+impl ReconcileOutcome {
+    pub fn is_degraded(self) -> bool {
+        matches!(self, Self::Degraded)
+    }
 }
 
 /// Structured result of applying a plan.

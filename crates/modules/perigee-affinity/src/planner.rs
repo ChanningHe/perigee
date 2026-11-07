@@ -171,6 +171,12 @@ pub fn plan(topology: &CpuTopology, vms: &[VmResource], policy: &AffinityPolicy)
 
     AffinityPlan {
         topology_fingerprint: topology.fingerprint.clone(),
+        topology_quality: topology.quality,
+        topology_warning: if matches!(topology.quality, TopologyQuality::Complete) {
+            None
+        } else {
+            Some(format!("topology quality is {:?}", topology.quality))
+        },
         assignments,
         reserved_cpus,
         external_occupied_cpus: external_occupied,

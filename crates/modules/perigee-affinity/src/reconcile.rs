@@ -90,10 +90,16 @@ pub fn reconcile(
     let mut changed = 0;
     let mut unchanged = 0;
     let mut failed = 0;
-    let mut warnings: Vec<String> = inventory
-        .warnings
+    let mut warnings: Vec<String> = plan
+        .topology_warning
         .iter()
-        .map(|warning| format!("VM {}: {}", warning.vmid, warning.message))
+        .cloned()
+        .chain(
+            inventory
+                .warnings
+                .iter()
+                .map(|warning| format!("VM {}: {}", warning.vmid, warning.message)),
+        )
         .chain(plan.warnings.iter().map(|warning| warning.message.clone()))
         .collect();
 
