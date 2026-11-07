@@ -1,0 +1,104 @@
+# CPU Affinity Rewrite TODO
+
+This is the execution checklist for the affinity rewrite. A phase is complete only when its implementation, tests, documentation impact, and review evidence are recorded.
+
+## Review protocol
+
+- After each phase, run `cargo fmt --all -- --check` and the relevant tests.
+- Perform an independent architecture review before moving to the next phase.
+- This Pi session does not expose an Agent/Astra subagent tool. Until one is available, the review must be explicitly labeled as a local independent second-pass review and must not be presented as a subagent review.
+- If a required subagent becomes available, use a fresh reviewer with no implementation context and record findings here.
+
+## Phases
+
+### Phase 0 — Contract and migration boundary
+
+- [x] Record decisions for ownership, active vCPU semantics, SMT, cache/NUMA degradation, and no synthetic CCDs.
+- [x] Define the new module boundary and preserve the old implementation as a migration boundary.
+- [x] Write the architecture specification.
+- [x] Local independent review: validate the contract against Proxmox semantics and current repository design.
+
+### Phase 1 — Typed domain model
+
+- [x] Add normalized `CpuSet`, physical-core, logical-CPU, topology-quality, VM CPU-shape, VM resource, policy, plan, and reconcile-report types.
+- [x] Make the types deterministic, validated, and independent of sysfs, PVE files, `qm`, TUI, and daemon state.
+- [x] Add unit tests for CPU-set normalization, vCPU shape calculation, invalid shapes, and stable formatting.
+- [x] Local independent second-pass review completed; no Astra/subagent tool is available in this session.
+
+#### Phase 1 review findings
+
+- The model correctly keeps `active_vcpus` separate from `max_vcpus` and rejects `active_vcpus > max_vcpus`.
+- The model is pure and has no adapter/runtime dependencies.
+- `CpuSet` normalization is deterministic and avoids the old range-formatting duplication.
+- Topology source metadata and filesystem fixture handling remain intentionally deferred to Phase 2.
+- The implementation does not yet replace the legacy planner; that migration remains blocked until the planner consumes these types.
+
+### Phase 2 — Topology adapter
+
+- [ ] Replace synthetic CCD fallback with explicit cache-domain/source/quality data.
+- [ ] Read logical CPUs, physical-core identity, siblings, package, NUMA and cache data where available.
+- [ ] Preserve unknown facts as unknown; never infer P/E from SMT shape.
+- [ ] Add fixture-driven topology tests for AMD-like SMT, Intel hybrid, generic, multi-socket, and incomplete sysfs data.
+- [ ] Review topology behavior independently.
+
+### Phase 3 — Proxmox inventory adapter
+
+- [ ] Parse `sockets`, legacy `smp`, `cores`, `vcpus`, `hotplug`, `affinity`, VM status and template state.
+- [ ] Calculate `max_vcpus = sockets * cores` and `active_vcpus = vcpus > 0 ? vcpus : max_vcpus`.
+- [ ] Treat missing Proxmox defaults correctly; never use zero as an implicit default.
+- [ ] Validate `vcpus <= max_vcpus` and report malformed configurations explicitly.
+- [ ] Add fixture tests for normal, hotplug, legacy, missing-field and invalid configurations.
+- [ ] Review inventory semantics independently.
+
+### Phase 4 — Pure planner
+
+- [ ] Implement deterministic planning by active vCPU count.
+- [ ] Separate managed VMs, excluded/external occupancy, host reservations and free capacity.
+- [ ] Prefer distinct physical cores; allow partial SMT use for odd vCPU counts.
+- [ ] Make cache/NUMA locality optional optimizations, not correctness requirements.
+- [ ] Preserve valid current assignments where possible to avoid churn.
+- [ ] Make exclusive/overcommit behavior explicit.
+- [ ] Return complete plans and explicit conflicts; never silently emit partial plans.
+- [ ] Add synthetic topology and planner property-style tests.
+- [ ] Review planner correctness independently.
+
+### Phase 5 — Reconciler and backend
+
+- [ ] Introduce a PVE backend abstraction for list/read/apply/verify operations.
+- [ ] Diff desired plan against current affinity.
+- [ ] Apply only changed managed VMs, serially and deterministically.
+- [ ] Verify each change after `qm set`.
+- [ ] Return structured partial-failure reports and map them to Running/Degraded/Error/Stopped.
+- [ ] Add fake-backend tests for idempotence, drift repair, excluded VMs, failures and retries.
+- [ ] Review runtime behavior independently.
+
+### Phase 6 — Configuration and daemon integration
+
+- [ ] Replace string round-tripping of nested TOML with typed deserialization.
+- [ ] Make configuration errors explicit; do not silently fall back to defaults.
+- [ ] Add periodic/manual/config-reload reconcile triggers.
+- [ ] Make daemon the authoritative applier when available.
+- [ ] Preserve excluded VM affinity and treat it as external occupancy.
+- [ ] Add status/reporting for topology degradation and partial reconcile failure.
+- [ ] Review daemon/config behavior independently.
+
+### Phase 7 — CLI and TUI migration
+
+- [ ] Make CLI and TUI consume the same inventory, planner, plan and report types.
+- [ ] Route mutations through daemon IPC when available.
+- [ ] Keep standalone mode explicit when daemon is unavailable.
+- [ ] Remove direct planner/application duplication from UI code.
+- [ ] Update displays from physical cores/SMT conversion language to active vCPU and allowed CPU-set language.
+- [ ] Review user-facing behavior independently.
+
+### Phase 8 — Compatibility, documentation and removal
+
+- [ ] Decide and test old config compatibility/migration.
+- [ ] Update README, CLI help and affinity specification.
+- [ ] Remove obsolete affinity planner, synthetic topology behavior and duplicated execution paths.
+- [ ] Run workspace tests, formatting, clippy where available, and targeted fixture tests.
+- [ ] Perform final independent review and record unresolved limitations.
+
+## Blocked stop condition
+
+Stop and report evidence if a phase cannot be completed without guessing Proxmox semantics, fabricating topology facts, breaking existing CLI/config behavior without a migration path, or changing unrelated modules.

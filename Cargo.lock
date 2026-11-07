@@ -661,6 +661,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "thiserror",
  "tokio",
  "toml",
  "tracing",
