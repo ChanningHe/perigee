@@ -126,7 +126,7 @@ fn parse_config(content: &str) -> Result<ParsedVmConfig> {
             "sockets" => config.sockets = Some(parse_positive(key, value)?),
             "smp" => config.smp = Some(parse_positive(key, value)?),
             "cores" => config.cores = Some(parse_positive(key, value)?),
-            "vcpus" => config.vcpus = Some(parse_positive(key, value)?),
+            "vcpus" => config.vcpus = Some(parse_nonnegative(key, value)?),
             "hotplug" => config.cpu_hotplug = hotplug_has_cpu(value),
             "template" => config.template = parse_boolish(value)?,
             "affinity" => {
@@ -151,6 +151,12 @@ fn parse_positive(key: &str, value: &str) -> Result<usize> {
         bail!("{key} must be greater than zero");
     }
     Ok(parsed)
+}
+
+fn parse_nonnegative(key: &str, value: &str) -> Result<usize> {
+    value
+        .parse::<usize>()
+        .with_context(|| format!("invalid {key} value '{value}'"))
 }
 
 fn parse_boolish(value: &str) -> Result<bool> {
@@ -249,9 +255,23 @@ mod tests {
     }
 
     #[test]
+    fn zero_vcpus_uses_the_proxmox_default() {
+        let vm = parse_vm_config(
+            105,
+            "default-vcpus",
+            "stopped",
+            "sockets: 2\ncores: 2\nvcpus: 0\n",
+            &[],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(vm.cpu.active_vcpus, 4);
+    }
+
+    #[test]
     fn malformed_cpu_shape_is_rejected() {
         let error = parse_vm_config(
-            105,
+            106,
             "bad",
             "stopped",
             "sockets: 1\ncores: 2\nvcpus: 3\n",
@@ -263,7 +283,7 @@ mod tests {
 
     #[test]
     fn malformed_affinity_is_rejected() {
-        let error = parse_vm_config(106, "bad", "stopped", "affinity: 8-4\n", &[]).unwrap_err();
+        let error = parse_vm_config(107, "bad", "stopped", "affinity: 8-4\n", &[]).unwrap_err();
         assert!(error.to_string().contains("invalid affinity"));
     }
 }

@@ -68,15 +68,24 @@ This is the execution checklist for the affinity rewrite. A phase is complete on
 
 ### Phase 4 — Pure planner
 
-- [ ] Implement deterministic planning by active vCPU count.
-- [ ] Separate managed VMs, excluded/external occupancy, host reservations and free capacity.
-- [ ] Prefer distinct physical cores; allow partial SMT use for odd vCPU counts.
-- [ ] Make cache/NUMA locality optional optimizations, not correctness requirements.
-- [ ] Preserve valid current assignments where possible to avoid churn.
-- [ ] Make exclusive/overcommit behavior explicit.
-- [ ] Return complete plans and explicit conflicts; never silently emit partial plans.
-- [ ] Add synthetic topology and planner property-style tests.
-- [ ] Review planner correctness independently.
+- [x] Implement deterministic planning by active vCPU count.
+- [x] Separate managed VMs, excluded/external occupancy, host reservations and free capacity.
+- [x] Prefer distinct physical cores; allow partial SMT use for odd vCPU counts.
+- [x] Make cache/NUMA locality optional optimizations, not correctness requirements.
+- [x] Preserve valid current assignments where possible to avoid churn.
+- [x] Make exclusive/overcommit behavior explicit in the policy model.
+- [x] Return complete plans and explicit conflicts; never silently emit partial plans.
+- [x] Add synthetic topology and planner tests.
+- [x] Local independent second-pass review completed; no Astra/subagent tool is available in this session.
+
+#### Phase 4 review findings
+
+- The new planner is pure and deterministic; all VM assignments are selected before application.
+- It plans exact active-vCPU-sized logical CPU sets and does not expand odd requests to sibling pairs.
+- Excluded VM affinity and host reservations are hard occupied capacity.
+- Valid managed affinity is preserved to reduce churn; invalid or conflicting affinity is replanned.
+- The planner emits conflicts rather than silently applying a partial result.
+- The current implementation deliberately keeps `AllowShared` as a policy boundary; shared managed allocation is not silently enabled by the default exclusive policy.
 
 ### Phase 5 — Reconciler and backend
 
