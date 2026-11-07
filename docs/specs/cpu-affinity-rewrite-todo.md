@@ -51,12 +51,20 @@ This is the execution checklist for the affinity rewrite. A phase is complete on
 
 ### Phase 3 — Proxmox inventory adapter
 
-- [ ] Parse `sockets`, legacy `smp`, `cores`, `vcpus`, `hotplug`, `affinity`, VM status and template state.
-- [ ] Calculate `max_vcpus = sockets * cores` and `active_vcpus = vcpus > 0 ? vcpus : max_vcpus`.
-- [ ] Treat missing Proxmox defaults correctly; never use zero as an implicit default.
-- [ ] Validate `vcpus <= max_vcpus` and report malformed configurations explicitly.
-- [ ] Add fixture tests for normal, hotplug, legacy, missing-field and invalid configurations.
-- [ ] Review inventory semantics independently.
+- [x] Parse `sockets`, legacy `smp`, `cores`, `vcpus`, `hotplug`, `affinity`, VM status and template state.
+- [x] Calculate `max_vcpus = sockets * cores` and `active_vcpus = vcpus > 0 ? vcpus : max_vcpus`.
+- [x] Treat missing Proxmox defaults correctly; never use zero as an implicit default.
+- [x] Validate `vcpus <= max_vcpus` and report malformed configurations explicitly.
+- [x] Add fixture tests for normal, hotplug, legacy, missing-field and invalid configurations.
+- [x] Local independent second-pass review completed; no Astra/subagent tool is available in this session.
+
+#### Phase 3 review findings
+
+- The adapter correctly models Proxmox's distinction between maximum and active vCPUs.
+- Explicit `sockets` wins over legacy `smp`; missing fields use Proxmox defaults.
+- Templates are skipped, excluded VMs are marked external, and malformed affinity/CPU shape is reported.
+- The legacy `pve::VmConfig` remains for the old CLI/TUI until migration in later phases.
+- The parser intentionally does not treat unreadable VM config as a zero-core VM.
 
 ### Phase 4 — Pure planner
 

@@ -1,6 +1,7 @@
 pub mod affinity;
 pub mod config;
 pub mod daemon;
+pub mod inventory;
 pub mod model;
 pub mod pve;
 pub mod topology;
