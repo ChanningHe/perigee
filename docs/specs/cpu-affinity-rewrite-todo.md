@@ -89,13 +89,21 @@ This is the execution checklist for the affinity rewrite. A phase is complete on
 
 ### Phase 5 — Reconciler and backend
 
-- [ ] Introduce a PVE backend abstraction for list/read/apply/verify operations.
-- [ ] Diff desired plan against current affinity.
-- [ ] Apply only changed managed VMs, serially and deterministically.
-- [ ] Verify each change after `qm set`.
-- [ ] Return structured partial-failure reports and map them to Running/Degraded/Error/Stopped.
-- [ ] Add fake-backend tests for idempotence, drift repair, excluded VMs, failures and retries.
-- [ ] Review runtime behavior independently.
+- [x] Introduce a PVE backend abstraction for list/read/apply/verify operations.
+- [x] Diff desired plan against current affinity.
+- [x] Apply only changed managed VMs, serially and deterministically.
+- [x] Verify each change after `qm set`.
+- [x] Return structured partial-failure reports and map them to Healthy/Degraded/Failed at the domain layer.
+- [x] Add fake-backend tests for idempotence, drift repair, excluded VMs, failures and retries.
+- [x] Local independent second-pass review completed; no Astra/subagent tool is available in this session.
+
+#### Phase 5 review findings
+
+- Reconcile refuses to partially apply a plan containing planner conflicts.
+- Changed assignments are applied serially and verified immediately.
+- A process-local mutex prevents concurrent reconcile calls from interleaving.
+- The production backend is isolated behind `AffinityBackend`; tests use `MemoryBackend`.
+- The current module/IPC state mapping remains to be integrated in Phase 6.
 
 ### Phase 6 — Configuration and daemon integration
 

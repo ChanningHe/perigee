@@ -1,3 +1,4 @@
+use crate::model::CpuSet;
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 use std::process::Command;
@@ -76,6 +77,16 @@ pub fn set_affinity(vmid: u32, affinity: &str, dry_run: bool) -> Result<()> {
         bail!("qm set failed: {}", stderr.trim());
     }
     Ok(())
+}
+
+pub fn read_vm_affinity(vmid: u32) -> Result<Option<CpuSet>> {
+    let config = read_vm_config(vmid)?;
+    config
+        .affinity
+        .as_deref()
+        .map(CpuSet::parse)
+        .transpose()
+        .map_err(|error| anyhow::anyhow!("invalid VM {} affinity: {}", vmid, error))
 }
 
 pub fn read_vm_config(vmid: u32) -> Result<VmConfig> {
