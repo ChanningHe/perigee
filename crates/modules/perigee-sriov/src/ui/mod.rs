@@ -2,6 +2,7 @@ pub mod fdb_config;
 pub mod pf_select;
 pub mod result;
 pub mod review;
+pub mod roce_config;
 pub mod vf_config;
 
 use crate::config::{sriov_config_path, SriovFileConfig, SriovProfileConfig};
@@ -46,15 +47,17 @@ pub enum EditorTab {
     General,
     VfTable,
     Fdb,
+    Roce,
     Review,
 }
 
 impl EditorTab {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Pf,
         Self::General,
         Self::VfTable,
         Self::Fdb,
+        Self::Roce,
         Self::Review,
     ];
 
@@ -64,6 +67,7 @@ impl EditorTab {
             Self::General => "General",
             Self::VfTable => "VF Table",
             Self::Fdb => "FDB",
+            Self::Roce => "RoCE",
             Self::Review => "Review",
         }
     }
@@ -81,7 +85,10 @@ impl EditorTab {
 pub enum EditFocus {
     ProfileName,
     GeneralVfCount,
+    GeneralRxRing,
     VfVlanId,
+    /// A RoCE numeric field; `roce_cursor` says which one.
+    RoceField,
 }
 
 pub struct SriovState {
@@ -98,12 +105,16 @@ pub struct SriovState {
 
     pub general_cursor: usize,
     pub vf_count_buf: String,
+    pub rx_ring_buf: String,
 
     pub vf_table_cursor: usize,
     pub vf_table_scroll: usize,
     pub vlan_id_buf: String,
 
     pub fdb_cursor: usize,
+
+    pub roce_cursor: usize,
+    pub roce_buf: String,
 
     pub edit_focus: Option<EditFocus>,
 
@@ -145,10 +156,13 @@ impl SriovState {
             selected_pf: 0,
             general_cursor: 0,
             vf_count_buf: String::new(),
+            rx_ring_buf: String::new(),
             vf_table_cursor: 0,
             vf_table_scroll: 0,
             vlan_id_buf: String::new(),
             fdb_cursor: 0,
+            roce_cursor: 0,
+            roce_buf: String::new(),
             edit_focus: None,
             profile_statuses: HashMap::new(),
             status_detail: None,
@@ -206,15 +220,25 @@ impl SriovState {
     }
 
     pub fn reset_editor_cursors(&mut self) {
+        self.clear_editor_inputs();
+        self.refresh_vf_usage();
+    }
+
+    /// Reset cursors, edit buffers and the message line (so a rejection from
+    /// one profile never shows on the next). Pure state, no filesystem access.
+    fn clear_editor_inputs(&mut self) {
+        self.message = None;
         self.general_cursor = 0;
         self.vf_count_buf.clear();
         self.vf_table_cursor = 0;
         self.vf_table_scroll = 0;
         self.vlan_id_buf.clear();
         self.fdb_cursor = 0;
+        self.roce_cursor = 0;
+        self.roce_buf.clear();
+        self.rx_ring_buf.clear();
         self.edit_focus = None;
         self.review_scroll = 0;
-        self.refresh_vf_usage();
     }
 
     /// Resolve the PF interface and scan VM passthrough usage once, on editor
@@ -992,6 +1016,7 @@ pub fn render_editor(
         EditorTab::General => vf_config::render_general(frame, sriov, chunks[2]),
         EditorTab::VfTable => vf_config::render_vf_table(frame, sriov, chunks[2]),
         EditorTab::Fdb => fdb_config::render(frame, sriov, chunks[2]),
+        EditorTab::Roce => roce_config::render(frame, sriov, chunks[2]),
         EditorTab::Review => review::render(frame, sriov, chunks[2]),
     }
     // (other tab renderers take &SriovState and reborrow from the &mut)
@@ -1049,6 +1074,7 @@ pub async fn handle_editor_input(
             EditorTab::General => vf_config::handle_general_input(sriov, key),
             EditorTab::VfTable => vf_config::handle_vf_table_input(sriov, key),
             EditorTab::Fdb => fdb_config::handle_input(sriov, key),
+            EditorTab::Roce => roce_config::handle_input(sriov, key),
             EditorTab::Review => review::handle_input(sriov, key),
         }
         return SriovUiAction::None;
@@ -1092,6 +1118,7 @@ pub async fn handle_editor_input(
         EditorTab::General => vf_config::handle_general_input(sriov, key),
         EditorTab::VfTable => vf_config::handle_vf_table_input(sriov, key),
         EditorTab::Fdb => fdb_config::handle_input(sriov, key),
+        EditorTab::Roce => roce_config::handle_input(sriov, key),
         EditorTab::Review => review::handle_input(sriov, key),
     }
     SriovUiAction::None
@@ -1262,6 +1289,165 @@ enabled = false
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(!text.contains("link_state"), "{text}");
         assert!(!text.contains("roce"), "{text}");
+    }
+
+    #[test]
+    fn editor_tabs_are_ordered_with_roce_before_review() {
+        assert_eq!(
+            EditorTab::ALL,
+            [
+                EditorTab::Pf,
+                EditorTab::General,
+                EditorTab::VfTable,
+                EditorTab::Fdb,
+                EditorTab::Roce,
+                EditorTab::Review,
+            ]
+        );
+        assert_eq!(EditorTab::Roce.title(), "RoCE");
+    }
+
+    #[test]
+    fn editor_tab_index_round_trips_for_every_tab() {
+        for (i, tab) in EditorTab::ALL.iter().enumerate() {
+            assert_eq!(tab.index(), i);
+            assert_eq!(EditorTab::from_index(tab.index()), *tab);
+        }
+    }
+
+    #[tokio::test]
+    async fn tab_and_backtab_cycle_through_all_six_tabs() {
+        let mut sriov = SriovState::new();
+        let mut seen = vec![sriov.active_tab];
+
+        for _ in 0..EditorTab::ALL.len() {
+            handle_editor_input(&mut sriov, KeyEvent::from(KeyCode::Tab), None).await;
+            seen.push(sriov.active_tab);
+        }
+        assert_eq!(seen.first(), seen.last(), "forward wraps to the start");
+        assert_eq!(&seen[..6], &EditorTab::ALL);
+
+        handle_editor_input(&mut sriov, KeyEvent::from(KeyCode::BackTab), None).await;
+        assert_eq!(
+            sriov.active_tab,
+            EditorTab::Review,
+            "backward wraps to the end"
+        );
+        handle_editor_input(&mut sriov, KeyEvent::from(KeyCode::BackTab), None).await;
+        assert_eq!(sriov.active_tab, EditorTab::Roce);
+    }
+
+    #[test]
+    fn clearing_editor_inputs_resets_cursors_buffers_and_message() {
+        let mut sriov = SriovState::new();
+        sriov.message = Some("rejected: dscp 64".to_string());
+        sriov.roce_buf = "64".to_string();
+        sriov.rx_ring_buf = "0".to_string();
+        sriov.roce_cursor = 3;
+        sriov.edit_focus = Some(EditFocus::RoceField);
+
+        sriov.clear_editor_inputs();
+
+        assert_eq!(sriov.message, None);
+        assert!(sriov.roce_buf.is_empty());
+        assert!(sriov.rx_ring_buf.is_empty());
+        assert_eq!(sriov.roce_cursor, 0);
+        assert_eq!(sriov.edit_focus, None);
+    }
+
+    async fn press_editor(sriov: &mut SriovState, code: KeyCode) -> SriovUiAction {
+        handle_editor_input(sriov, KeyEvent::from(code), None).await
+    }
+
+    /// Put the editor mid-edit on the General tab's RX ring row, buffer "12".
+    async fn editing_rx_ring() -> SriovState {
+        let mut sriov = SriovState::new();
+        sriov.active_tab = EditorTab::General;
+        sriov.general_cursor = 5;
+        press_editor(&mut sriov, KeyCode::Enter).await;
+        press_editor(&mut sriov, KeyCode::Char('1')).await;
+        press_editor(&mut sriov, KeyCode::Char('2')).await;
+        assert_eq!(sriov.edit_focus, Some(EditFocus::GeneralRxRing));
+        sriov
+    }
+
+    /// Put the editor mid-edit on the RoCE tab's DSCP row, buffer "26".
+    async fn editing_roce_dscp() -> SriovState {
+        let mut sriov = SriovState::new();
+        sriov.active_tab = EditorTab::Roce;
+        press_editor(&mut sriov, KeyCode::Enter).await;
+        sriov.roce_cursor = 1;
+        press_editor(&mut sriov, KeyCode::Enter).await;
+        assert_eq!(sriov.edit_focus, Some(EditFocus::RoceField));
+        sriov
+    }
+
+    #[tokio::test]
+    async fn escape_cancels_an_rx_ring_edit_without_leaving_the_editor() {
+        let mut sriov = editing_rx_ring().await;
+
+        let action = press_editor(&mut sriov, KeyCode::Esc).await;
+
+        assert!(matches!(action, SriovUiAction::None), "{action:?}");
+        assert_eq!(sriov.active_tab, EditorTab::General);
+        assert_eq!(sriov.edit_focus, None);
+        assert_eq!(sriov.editing_profile.and_then(|p| p.rx_ring), None);
+    }
+
+    #[tokio::test]
+    async fn escape_cancels_a_roce_edit_without_leaving_the_editor() {
+        let mut sriov = editing_roce_dscp().await;
+
+        let action = press_editor(&mut sriov, KeyCode::Esc).await;
+
+        assert!(matches!(action, SriovUiAction::None), "{action:?}");
+        assert_eq!(sriov.active_tab, EditorTab::Roce);
+        assert_eq!(sriov.edit_focus, None);
+    }
+
+    #[tokio::test]
+    async fn q_and_arrows_are_inert_during_an_rx_ring_edit() {
+        for code in [KeyCode::Char('q'), KeyCode::Left, KeyCode::Right] {
+            let mut sriov = editing_rx_ring().await;
+
+            let action = press_editor(&mut sriov, code).await;
+
+            assert!(matches!(action, SriovUiAction::None), "{code:?}");
+            assert_eq!(sriov.active_tab, EditorTab::General, "{code:?}");
+            assert_eq!(sriov.edit_focus, Some(EditFocus::GeneralRxRing));
+            assert_eq!(sriov.rx_ring_buf, "12", "{code:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn q_and_arrows_are_inert_during_a_roce_edit() {
+        for code in [KeyCode::Char('q'), KeyCode::Left, KeyCode::Right] {
+            let mut sriov = editing_roce_dscp().await;
+            let buffer_before = sriov.roce_buf.clone();
+
+            let action = press_editor(&mut sriov, code).await;
+
+            assert!(matches!(action, SriovUiAction::None), "{code:?}");
+            assert_eq!(sriov.active_tab, EditorTab::Roce, "{code:?}");
+            assert_eq!(sriov.edit_focus, Some(EditFocus::RoceField));
+            assert_eq!(sriov.roce_buf, buffer_before, "{code:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn roce_tab_edit_focus_routes_keys_to_the_roce_handler() {
+        let mut sriov = SriovState::new();
+        sriov.active_tab = EditorTab::Roce;
+        sriov.roce_cursor = 0;
+
+        handle_editor_input(&mut sriov, KeyEvent::from(KeyCode::Enter), None).await;
+        sriov.roce_cursor = 1;
+        handle_editor_input(&mut sriov, KeyEvent::from(KeyCode::Enter), None).await;
+        assert_eq!(sriov.edit_focus, Some(EditFocus::RoceField));
+        handle_editor_input(&mut sriov, KeyEvent::from(KeyCode::Tab), None).await;
+
+        assert_eq!(sriov.active_tab, EditorTab::Roce, "Tab is ignored mid-edit");
+        assert_eq!(sriov.roce_buf, "26");
     }
 
     #[test]

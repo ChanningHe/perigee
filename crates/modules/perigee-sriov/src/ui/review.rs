@@ -126,11 +126,11 @@ fn render_summary(frame: &mut Frame, sriov: &SriovState, area: Rect) {
         ]));
         if profile.roce_enabled() {
             lines.push(Line::from(Span::styled(
-                "    ⚠ PFC changes flap the PF link: with VFs present they wait for next boot",
+                format!("    {}", super::roce_config::PFC_FLAP_WARNING),
                 common::style_warn(),
             )));
         }
-        // Edited only in sriov.toml; shown when managed.
+        // Edited on the General tab; shown when managed.
         if let Some(rx) = profile.rx_ring {
             lines.push(Line::from(vec![
                 Span::styled("    ", Style::default()),
@@ -189,7 +189,7 @@ fn render_summary(frame: &mut Frame, sriov: &SriovState, area: Rect) {
     frame.render_widget(para, area);
 }
 
-/// One-line view of the RoCE section; edited only in sriov.toml.
+/// One-line view of the RoCE section; edited on the RoCE tab.
 fn roce_summary(roce: Option<&crate::config::RoceConfig>) -> String {
     match roce {
         None => "not configured".to_string(),

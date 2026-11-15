@@ -13,12 +13,57 @@ use crate::config::MacStrategyConfig;
 
 // ── General tab fields ──
 
-const GENERAL_FIELDS: usize = 5;
+const GENERAL_FIELDS: usize = 6;
 const FIELD_VF_COUNT: usize = 0;
 const FIELD_MAC_STRATEGY: usize = 1;
 const FIELD_TRUST: usize = 2;
 const FIELD_SPOOFCHK: usize = 3;
 const FIELD_LINK_STATE: usize = 4;
+const FIELD_RX_RING: usize = 5;
+/// Shown on its own row under the field: a long hint would be clipped at 80 columns.
+const RX_RING_HINT: &str = "Empty = unmanaged. A live change briefly drops the PF link.";
+
+/// Value style shared by the field rows: editing beats selected beats plain.
+pub(super) fn value_style(is_editing: bool, is_active: bool) -> Style {
+    if is_editing {
+        common::style_editing()
+    } else if is_active {
+        common::style_selected()
+    } else {
+        common::style_value()
+    }
+}
+
+/// One `label  value  hint` row of a field list; the hint shows on the active row.
+pub(super) fn styled_field_line(
+    is_active: bool,
+    label: &str,
+    value: &str,
+    val_style: Style,
+    hint: &str,
+) -> Line<'static> {
+    let indicator = if is_active { " ▸ " } else { "   " };
+    Line::from(vec![
+        Span::styled(
+            indicator.to_string(),
+            if is_active {
+                Style::default().fg(common::SELECTED)
+            } else {
+                common::style_muted()
+            },
+        ),
+        Span::styled(format!("{:<16}", label), common::style_label()),
+        Span::styled(value.to_string(), val_style),
+        Span::styled(
+            if is_active && !hint.is_empty() {
+                format!("  {}", hint)
+            } else {
+                String::new()
+            },
+            common::style_muted(),
+        ),
+    ])
+}
 
 pub fn render_general(frame: &mut Frame, sriov: &SriovState, area: Rect) {
     let profile = &sriov.editing_profile;
@@ -51,41 +96,24 @@ pub fn render_general(frame: &mut Frame, sriov: &SriovState, area: Rect) {
         .and_then(|p| p.defaults.link_state)
         .map_or("unmanaged", |s| s.as_str());
 
+    let is_editing_rx_ring = sriov.edit_focus == Some(EditFocus::GeneralRxRing);
+    let rx_ring_display = if is_editing_rx_ring {
+        format!("[{}▎]", sriov.rx_ring_buf)
+    } else {
+        profile
+            .as_ref()
+            .and_then(|p| p.rx_ring)
+            .map_or_else(|| "unmanaged".to_string(), |n| n.to_string())
+    };
+
     let field_line =
         |idx: usize, label: &str, value: &str, is_editing: bool, hint: &str| -> Line<'static> {
             let is_active = cursor == idx;
-            let indicator = if is_active { " ▸ " } else { "   " };
-            let val_style = if is_editing {
-                common::style_editing()
-            } else if is_active {
-                common::style_selected()
-            } else {
-                common::style_value()
-            };
-
-            Line::from(vec![
-                Span::styled(
-                    indicator.to_string(),
-                    if is_active {
-                        Style::default().fg(common::SELECTED)
-                    } else {
-                        common::style_muted()
-                    },
-                ),
-                Span::styled(format!("{:<16}", label), common::style_label()),
-                Span::styled(value.to_string(), val_style),
-                Span::styled(
-                    if is_active && !hint.is_empty() {
-                        format!("  {}", hint)
-                    } else {
-                        String::new()
-                    },
-                    common::style_muted(),
-                ),
-            ])
+            let val_style = value_style(is_editing, is_active);
+            styled_field_line(is_active, label, value, val_style, hint)
         };
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(""),
         field_line(
             FIELD_VF_COUNT,
@@ -131,7 +159,21 @@ pub fn render_general(frame: &mut Frame, sriov: &SriovState, area: Rect) {
             false,
             "Enter to cycle (unmanaged leaves VFs as they are)",
         ),
+        Line::from(""),
+        field_line(
+            FIELD_RX_RING,
+            "PF RX ring:",
+            &rx_ring_display,
+            is_editing_rx_ring,
+            "",
+        ),
     ];
+    if cursor == FIELD_RX_RING {
+        lines.push(Line::from(Span::styled(
+            format!("   {RX_RING_HINT}"),
+            common::style_muted(),
+        )));
+    }
 
     let para = Paragraph::new(lines).block(
         Block::default()
@@ -142,6 +184,11 @@ pub fn render_general(frame: &mut Frame, sriov: &SriovState, area: Rect) {
 }
 
 pub fn handle_general_input(sriov: &mut SriovState, key: KeyEvent) {
+    if sriov.edit_focus == Some(EditFocus::GeneralRxRing) {
+        handle_rx_ring_edit(sriov, key);
+        return;
+    }
+
     if sriov.edit_focus == Some(EditFocus::GeneralVfCount) {
         match key.code {
             KeyCode::Char(c) if c.is_ascii_digit() => {
@@ -210,10 +257,66 @@ pub fn handle_general_input(sriov: &mut SriovState, key: KeyEvent) {
                             crate::config::next_link_state(profile.defaults.link_state);
                     }
                 }
+                FIELD_RX_RING => start_rx_ring_edit(sriov),
                 _ => {}
             }
         }
         _ => {}
+    }
+}
+
+fn start_rx_ring_edit(sriov: &mut SriovState) {
+    sriov.rx_ring_buf = sriov
+        .editing_profile
+        .as_ref()
+        .and_then(|p| p.rx_ring)
+        .map(|n| n.to_string())
+        .unwrap_or_default();
+    sriov.message = None;
+    sriov.edit_focus = Some(EditFocus::GeneralRxRing);
+}
+
+fn handle_rx_ring_edit(sriov: &mut SriovState, key: KeyEvent) {
+    match key.code {
+        KeyCode::Char(c) if c.is_ascii_digit() => sriov.rx_ring_buf.push(c),
+        KeyCode::Backspace => {
+            sriov.rx_ring_buf.pop();
+        }
+        KeyCode::Enter => commit_rx_ring(sriov),
+        KeyCode::Esc => {
+            sriov.rx_ring_buf.clear();
+            sriov.message = None;
+            sriov.edit_focus = None;
+        }
+        _ => {}
+    }
+}
+
+/// Apply the edit buffer. A rejected value leaves the profile untouched and
+/// explains why in the message line; the edit ends either way.
+fn commit_rx_ring(sriov: &mut SriovState) {
+    sriov.edit_focus = None;
+    match parse_rx_ring(&sriov.rx_ring_buf) {
+        Ok(value) => {
+            if let Some(profile) = sriov.editing_profile.as_mut() {
+                profile.rx_ring = value;
+            }
+            sriov.message = None;
+        }
+        Err(msg) => sriov.message = Some(msg),
+    }
+    sriov.rx_ring_buf.clear();
+}
+
+/// Empty means unmanaged. The device maximum is checked at apply time, not here.
+fn parse_rx_ring(text: &str) -> Result<Option<u32>, String> {
+    if text.is_empty() {
+        return Ok(None);
+    }
+    match text.parse::<u32>() {
+        Ok(0) => Err("RX ring must be greater than 0 (clear the field for unmanaged)".to_string()),
+        Ok(n) => Ok(Some(n)),
+        Err(_) => Err(format!("RX ring must be at most {}", u32::MAX)),
     }
 }
 
@@ -593,7 +696,7 @@ fn toggle_vf_field(
     }
 }
 
-fn ensure_editing_profile(sriov: &mut SriovState) {
+pub(super) fn ensure_editing_profile(sriov: &mut SriovState) {
     if sriov.editing_profile.is_none() {
         sriov.editing_profile = Some(crate::config::SriovProfileConfig {
             mac: perigee_core::mac::MacAddress::ZERO,
@@ -605,5 +708,255 @@ fn ensure_editing_profile(sriov: &mut SriovState) {
             roce: None,
             rx_ring: None,
         });
+    }
+}
+
+#[cfg(test)]
+mod rx_ring_tests {
+    use super::*;
+
+    fn press(sriov: &mut SriovState, code: KeyCode) {
+        handle_general_input(sriov, KeyEvent::from(code));
+    }
+
+    fn type_text(sriov: &mut SriovState, text: &str) {
+        for c in text.chars() {
+            press(sriov, KeyCode::Char(c));
+        }
+    }
+
+    /// State on the RX ring row with a profile holding `rx_ring`.
+    fn state_with(rx_ring: Option<u32>) -> SriovState {
+        let mut sriov = SriovState::new();
+        ensure_editing_profile(&mut sriov);
+        if let Some(profile) = sriov.editing_profile.as_mut() {
+            profile.rx_ring = rx_ring;
+        }
+        sriov.general_cursor = FIELD_RX_RING;
+        sriov
+    }
+
+    fn rx_ring(sriov: &SriovState) -> Option<u32> {
+        sriov.editing_profile.as_ref().and_then(|p| p.rx_ring)
+    }
+
+    /// Start an edit, replace the buffer with `text`, and press Enter.
+    fn commit(sriov: &mut SriovState, text: &str) {
+        press(sriov, KeyCode::Enter);
+        while !sriov.rx_ring_buf.is_empty() {
+            press(sriov, KeyCode::Backspace);
+        }
+        type_text(sriov, text);
+        press(sriov, KeyCode::Enter);
+    }
+
+    #[test]
+    fn rx_ring_is_the_sixth_general_field_after_link_state() {
+        assert_eq!(GENERAL_FIELDS, 6);
+        assert_eq!(FIELD_RX_RING, FIELD_LINK_STATE + 1);
+    }
+
+    #[test]
+    fn rx_ring_cursor_wraps_through_the_new_field() {
+        let mut sriov = state_with(None);
+        sriov.general_cursor = FIELD_LINK_STATE;
+
+        press(&mut sriov, KeyCode::Down);
+        assert_eq!(sriov.general_cursor, FIELD_RX_RING);
+        press(&mut sriov, KeyCode::Down);
+        assert_eq!(sriov.general_cursor, FIELD_VF_COUNT);
+        press(&mut sriov, KeyCode::Up);
+        assert_eq!(sriov.general_cursor, FIELD_RX_RING);
+    }
+
+    #[test]
+    fn enter_starts_an_edit_prefilled_with_the_current_value() {
+        let mut sriov = state_with(Some(4096));
+
+        press(&mut sriov, KeyCode::Enter);
+
+        assert_eq!(sriov.edit_focus, Some(EditFocus::GeneralRxRing));
+        assert_eq!(sriov.rx_ring_buf, "4096");
+    }
+
+    #[test]
+    fn enter_on_unmanaged_starts_an_edit_with_an_empty_buffer() {
+        let mut sriov = state_with(None);
+        sriov.rx_ring_buf = "stale".to_string();
+
+        press(&mut sriov, KeyCode::Enter);
+
+        assert_eq!(sriov.edit_focus, Some(EditFocus::GeneralRxRing));
+        assert!(sriov.rx_ring_buf.is_empty());
+    }
+
+    #[test]
+    fn typing_a_number_and_enter_sets_the_ring_size() {
+        let mut sriov = state_with(None);
+
+        commit(&mut sriov, "8192");
+
+        assert_eq!(rx_ring(&sriov), Some(8192));
+        assert_eq!(sriov.edit_focus, None);
+        assert_eq!(sriov.message, None);
+    }
+
+    #[test]
+    fn clearing_the_buffer_and_enter_makes_it_unmanaged() {
+        let mut sriov = state_with(Some(8192));
+
+        commit(&mut sriov, "");
+
+        assert_eq!(rx_ring(&sriov), None);
+        assert_eq!(sriov.edit_focus, None);
+    }
+
+    #[test]
+    fn zero_is_rejected_and_keeps_the_value() {
+        let mut sriov = state_with(Some(4096));
+
+        commit(&mut sriov, "0");
+
+        assert_eq!(rx_ring(&sriov), Some(4096));
+        assert_eq!(sriov.edit_focus, None);
+        assert!(sriov.message.is_some());
+    }
+
+    #[test]
+    fn a_value_overflowing_u32_is_rejected_and_keeps_the_value() {
+        let mut sriov = state_with(Some(4096));
+
+        commit(&mut sriov, "4294967296");
+
+        assert_eq!(rx_ring(&sriov), Some(4096));
+        assert_eq!(sriov.edit_focus, None);
+        assert!(sriov.message.is_some());
+    }
+
+    #[test]
+    fn u32_max_is_accepted() {
+        let mut sriov = state_with(None);
+
+        commit(&mut sriov, "4294967295");
+
+        assert_eq!(rx_ring(&sriov), Some(u32::MAX));
+    }
+
+    #[test]
+    fn escape_cancels_without_changing_the_value() {
+        let mut sriov = state_with(Some(4096));
+
+        press(&mut sriov, KeyCode::Enter);
+        type_text(&mut sriov, "99");
+        press(&mut sriov, KeyCode::Esc);
+
+        assert_eq!(rx_ring(&sriov), Some(4096));
+        assert_eq!(sriov.edit_focus, None);
+        assert_eq!(sriov.message, None);
+    }
+
+    #[test]
+    fn non_digit_keys_are_ignored_while_editing() {
+        let mut sriov = state_with(None);
+
+        press(&mut sriov, KeyCode::Enter);
+        type_text(&mut sriov, "1a-2 .3e");
+        press(&mut sriov, KeyCode::Tab);
+
+        assert_eq!(sriov.rx_ring_buf, "123");
+        assert_eq!(sriov.edit_focus, Some(EditFocus::GeneralRxRing));
+    }
+
+    fn general_screen(sriov: &SriovState) -> String {
+        general_screen_at(sriov, 140)
+    }
+
+    fn general_screen_at(sriov: &SriovState, width: u16) -> String {
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24))
+            .expect("test terminal");
+        terminal
+            .draw(|frame| render_general(frame, sriov, frame.area()))
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        buffer
+            .content()
+            .chunks(usize::from(buffer.area.width))
+            .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn render_shows_unmanaged_the_number_and_the_edit_buffer() {
+        let mut sriov = state_with(None);
+        let before = general_screen(&sriov);
+        let ring_row = before
+            .lines()
+            .find(|l| l.contains("PF RX ring:"))
+            .unwrap_or_default();
+        assert!(
+            ring_row.contains("PF RX ring:") && ring_row.contains("unmanaged"),
+            "{before}"
+        );
+
+        sriov.editing_profile.as_mut().expect("profile").rx_ring = Some(4096);
+        let text = general_screen(&sriov);
+        let ring_row = text.lines().find(|l| l.contains("PF RX ring:"));
+        assert!(ring_row.is_some_and(|l| l.contains("4096")), "{text}");
+        assert!(text.contains("briefly drops the PF link"), "{text}");
+
+        press(&mut sriov, KeyCode::Enter);
+        type_text(&mut sriov, "1");
+        assert!(general_screen(&sriov).contains("[40961▎]"));
+    }
+
+    #[test]
+    fn rx_ring_row_and_hint_fit_80_columns() {
+        let mut sriov = state_with(None);
+        press(&mut sriov, KeyCode::Enter);
+        type_text(&mut sriov, "4294967295");
+
+        let text = general_screen_at(&sriov, 80);
+
+        let ring_row = text.lines().find(|l| l.contains("PF RX ring:"));
+        assert!(
+            ring_row.is_some_and(|l| l.contains("[4294967295▎]")),
+            "{text}"
+        );
+        assert!(text.contains("Empty = unmanaged"), "{text}");
+        assert!(text.contains("briefly drops the PF link"), "{text}");
+    }
+
+    #[test]
+    fn starting_an_edit_clears_a_stale_message() {
+        let mut sriov = state_with(Some(4096));
+        sriov.message = Some("stale".to_string());
+
+        press(&mut sriov, KeyCode::Enter);
+
+        assert_eq!(sriov.message, None);
+    }
+
+    #[test]
+    fn escape_clears_a_message_left_over_from_an_earlier_action() {
+        let mut sriov = state_with(Some(4096));
+        press(&mut sriov, KeyCode::Enter);
+        sriov.message = Some("stale".to_string());
+
+        press(&mut sriov, KeyCode::Esc);
+
+        assert_eq!(sriov.message, None);
+        assert_eq!(rx_ring(&sriov), Some(4096));
+    }
+
+    #[test]
+    fn backspace_on_an_empty_buffer_is_harmless() {
+        let mut sriov = state_with(None);
+
+        press(&mut sriov, KeyCode::Enter);
+        press(&mut sriov, KeyCode::Backspace);
+
+        assert!(sriov.rx_ring_buf.is_empty());
+        assert_eq!(sriov.edit_focus, Some(EditFocus::GeneralRxRing));
     }
 }

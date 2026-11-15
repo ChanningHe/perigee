@@ -181,8 +181,10 @@ typo, and then no profile is applied.
 - **PF only**: VF rings are configured inside each guest and are not
   inherited from the PF.
 
-The TUI shows `rx_ring` in the review summary when set (edit it in
-`sriov.toml`); `perigee sriov show` prints it.
+In the TUI, edit it on the General tab (`PF RX ring`): type a number, or clear
+the field for unmanaged. `0` and values above the u32 range are refused; the
+device maximum is checked at apply time. The review summary shows it when set,
+and `perigee sriov show` prints it.
 
 ### PF RoCE / lossless Ethernet (`roce`, opt-in, mlx5 only)
 
@@ -207,6 +209,10 @@ cnp_dscp = 48               # congestion notification DSCP (0-63, != dscp)
 cnp_priority = 6            # (0-7)
 pfc_storm_timeout_ms = 100  # 0 disables, else 80-8000
 ```
+
+The TUI edits this section on the RoCE tab: `Enabled` creates it with the
+defaults above (later toggles only flip `enabled`; the section is never
+removed), and each numeric row is validated before it is stored.
 
 Only `enabled` is required; the other keys default to the values shown. The
 host's RDMA CM default ToS is derived from `dscp` (`dscp << 2 | ECT(0)`, so
