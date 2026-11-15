@@ -138,6 +138,14 @@ fn render_summary(frame: &mut Frame, sriov: &SriovState, area: Rect) {
                 Span::styled(rx.to_string(), common::style_value()),
             ]));
         }
+        if let Some(warning) =
+            super::vf_config::rx_ring_over_max_warning(profile.rx_ring, &sriov.pf_ring_probe)
+        {
+            lines.push(Line::from(Span::styled(
+                format!("    {warning}"),
+                common::style_warn(),
+            )));
+        }
 
         lines.push(Line::from(""));
 
@@ -275,6 +283,59 @@ pub fn handle_input(sriov: &mut SriovState, key: KeyEvent) {
 mod tests {
     use super::SriovState;
     use crate::config::SriovFileConfig;
+    use crate::pf_ring::RingState;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    /// Render the summary pane at 80 columns for a profile with `rx_ring`.
+    fn summary_text(rx_ring: Option<u32>, max: Option<u32>) -> String {
+        let mut sriov = SriovState::new();
+        sriov.editing_name = "p".to_string();
+        let ring_line = rx_ring
+            .map(|n| format!("rx_ring = {n}\n"))
+            .unwrap_or_default();
+        let toml = format!("[sriov.p]\nmac = \"8c:2a:8e:88:9a:f6\"\nnum_vfs = 4\n{ring_line}");
+        sriov.editing_profile =
+            Some(toml::from_str::<SriovFileConfig>(&toml).unwrap().sriov["p"].clone());
+        sriov.pf_ring_probe = max.map(|max| Ok(RingState { current: 1024, max }));
+        let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
+        terminal
+            .draw(|frame| super::render_summary(frame, &sriov, frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        buffer
+            .content()
+            .chunks(usize::from(buffer.area.width))
+            .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn review_warns_when_rx_ring_exceeds_the_known_maximum() {
+        let text = summary_text(Some(8192), Some(1024));
+
+        assert!(text.contains("RX ring:"), "{text}");
+        assert!(
+            text.contains("RX ring 8192 exceeds device max 1024; apply will refuse it"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn review_has_no_rx_ring_warning_when_equal_unknown_or_unmanaged() {
+        for (rx, max) in [
+            (Some(1024), Some(1024)),
+            (Some(8192), None),
+            (None, Some(1024)),
+        ] {
+            let text = summary_text(rx, max);
+
+            assert!(
+                !text.contains("exceeds device max"),
+                "{rx:?} {max:?}: {text}"
+            );
+        }
+    }
 
     const WITH_RING: &str =
         "[sriov.ring]\nmac = \"8c:2a:8e:88:9a:f6\"\nnum_vfs = 4\nrx_ring = 8192\n\n\

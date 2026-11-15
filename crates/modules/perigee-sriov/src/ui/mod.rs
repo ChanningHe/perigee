@@ -7,6 +7,7 @@ pub mod vf_config;
 
 use crate::config::{sriov_config_path, SriovFileConfig, SriovProfileConfig};
 use crate::detect::PhysicalFunction;
+use crate::pf_ring::RingState;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use perigee_core::ipc::{
     FdbEntryInfo, ProfileDetailStatus, ProfileState, Request, Response, VfUser,
@@ -134,6 +135,9 @@ pub struct SriovState {
     /// Table renderer never scans /etc/pve or all of /sys/class/net per frame.
     pub vf_users: HashMap<String, VfUser>,
     pub editor_pf_iface: Option<String>,
+    /// Last `ethtool -g` probe of the editing profile's PF. `None` = not
+    /// probed or no PF resolved. Set only from event handlers, never render.
+    pub pf_ring_probe: Option<Result<RingState, String>>,
 }
 
 impl Default for SriovState {
@@ -173,6 +177,7 @@ impl SriovState {
             fdb_scroll: 0,
             vf_users: HashMap::new(),
             editor_pf_iface: None,
+            pf_ring_probe: None,
         }
     }
 
@@ -222,12 +227,15 @@ impl SriovState {
     pub fn reset_editor_cursors(&mut self) {
         self.clear_editor_inputs();
         self.refresh_vf_usage();
+        let iface = self.editor_pf_iface.clone();
+        self.set_pf_ring_with(iface.as_deref(), crate::pf_ring::probe);
     }
 
     /// Reset cursors, edit buffers and the message line (so a rejection from
     /// one profile never shows on the next). Pure state, no filesystem access.
     fn clear_editor_inputs(&mut self) {
         self.message = None;
+        self.pf_ring_probe = None;
         self.general_cursor = 0;
         self.vf_count_buf.clear();
         self.vf_table_cursor = 0;
@@ -249,6 +257,15 @@ impl SriovState {
             .as_ref()
             .and_then(|p| perigee_core::sysfs::find_iface_by_mac(&p.mac.to_string()).ok());
         self.vf_users = crate::vm_usage::scan_vf_users();
+    }
+
+    /// Probe `iface`'s RX ring and cache the result; no iface clears it.
+    pub fn set_pf_ring_with(
+        &mut self,
+        iface: Option<&str>,
+        probe: impl Fn(&str) -> Result<RingState, String>,
+    ) {
+        self.pf_ring_probe = iface.map(probe);
     }
 
     pub fn sync_vf_count_buf(&mut self) {
@@ -1335,6 +1352,58 @@ enabled = false
         );
         handle_editor_input(&mut sriov, KeyEvent::from(KeyCode::BackTab), None).await;
         assert_eq!(sriov.active_tab, EditorTab::Roce);
+    }
+
+    fn ring(current: u32, max: u32) -> RingState {
+        RingState { current, max }
+    }
+
+    #[test]
+    fn injected_probe_result_is_stored_for_the_iface() {
+        let mut sriov = SriovState::new();
+        let seen = std::cell::RefCell::new(Vec::<String>::new());
+
+        sriov.set_pf_ring_with(Some("enp1s0"), |iface| {
+            seen.borrow_mut().push(iface.to_string());
+            Ok(ring(1024, 8192))
+        });
+
+        assert_eq!(sriov.pf_ring_probe, Some(Ok(ring(1024, 8192))));
+        assert_eq!(seen.into_inner(), vec!["enp1s0".to_string()]);
+    }
+
+    #[test]
+    fn failed_probe_is_stored_as_an_error() {
+        let mut sriov = SriovState::new();
+
+        sriov.set_pf_ring_with(Some("enp1s0"), |_| Err("no ethtool".to_string()));
+
+        assert_eq!(sriov.pf_ring_probe, Some(Err("no ethtool".to_string())));
+    }
+
+    #[test]
+    fn missing_iface_clears_the_state_without_probing() {
+        let mut sriov = SriovState::new();
+        sriov.pf_ring_probe = Some(Ok(ring(1, 2)));
+        let called = std::cell::Cell::new(false);
+
+        sriov.set_pf_ring_with(None, |_| {
+            called.set(true);
+            Ok(ring(3, 4))
+        });
+
+        assert_eq!(sriov.pf_ring_probe, None);
+        assert!(!called.get(), "no PF means nothing to probe");
+    }
+
+    #[test]
+    fn clearing_editor_inputs_resets_the_ring_probe() {
+        let mut sriov = SriovState::new();
+        sriov.pf_ring_probe = Some(Ok(ring(1024, 8192)));
+
+        sriov.clear_editor_inputs();
+
+        assert_eq!(sriov.pf_ring_probe, None);
     }
 
     #[test]

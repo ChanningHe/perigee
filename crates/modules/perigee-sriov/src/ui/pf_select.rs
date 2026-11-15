@@ -9,6 +9,7 @@ use ratatui::{
 };
 
 use super::SriovState;
+use crate::pf_ring::RingState;
 
 pub fn render(frame: &mut Frame, sriov: &SriovState, area: Rect) {
     let chunks = Layout::default()
@@ -151,7 +152,44 @@ pub fn render(frame: &mut Frame, sriov: &SriovState, area: Rect) {
     frame.render_widget(para, chunks[1]);
 }
 
+/// Adopt the highlighted PF into the profile and probe its RX ring maximum
+/// once, here, so the General tab never does I/O while rendering.
+fn select_pf(sriov: &mut SriovState, probe: &dyn Fn(&str) -> Result<RingState, String>) {
+    let Some(pf) = sriov.detected_pfs.get(sriov.selected_pf) else {
+        return;
+    };
+    let mac = pf.mac_address;
+    let iface = pf.iface_name.clone();
+    if let Some(ref mut profile) = sriov.editing_profile {
+        profile.mac = mac;
+    } else {
+        sriov.editing_profile = Some(crate::config::SriovProfileConfig {
+            mac,
+            num_vfs: pf.max_vfs.min(16),
+            mac_strategy: crate::config::MacStrategyConfig::Sequential,
+            defaults: crate::config::VfDefaults::default(),
+            vf: Vec::new(),
+            fdb: crate::config::FdbConfig::default(),
+            roce: None,
+            rx_ring: None,
+        });
+    }
+    if sriov.editing_name.is_empty() {
+        sriov.editing_name = iface.clone();
+    }
+    sriov.set_pf_ring_with(Some(&iface), probe);
+}
+
 pub fn handle_input(sriov: &mut SriovState, key: KeyEvent) {
+    handle_input_with(sriov, key, &crate::pf_ring::probe);
+}
+
+/// `handle_input` with the ring probe injectable (tests must not run ethtool).
+fn handle_input_with(
+    sriov: &mut SriovState,
+    key: KeyEvent,
+    probe: &dyn Fn(&str) -> Result<RingState, String>,
+) {
     let pf_count = sriov.detected_pfs.len();
 
     match key.code {
@@ -163,28 +201,7 @@ pub fn handle_input(sriov: &mut SriovState, key: KeyEvent) {
         KeyCode::Down | KeyCode::Char('j') => {
             sriov.selected_pf = common::wrap_step(sriov.selected_pf, pf_count, true);
         }
-        KeyCode::Enter => {
-            if let Some(pf) = sriov.detected_pfs.get(sriov.selected_pf) {
-                let mac = pf.mac_address;
-                if let Some(ref mut profile) = sriov.editing_profile {
-                    profile.mac = mac;
-                } else {
-                    sriov.editing_profile = Some(crate::config::SriovProfileConfig {
-                        mac,
-                        num_vfs: pf.max_vfs.min(16),
-                        mac_strategy: crate::config::MacStrategyConfig::Sequential,
-                        defaults: crate::config::VfDefaults::default(),
-                        vf: Vec::new(),
-                        fdb: crate::config::FdbConfig::default(),
-                        roce: None,
-                        rx_ring: None,
-                    });
-                }
-                if sriov.editing_name.is_empty() {
-                    sriov.editing_name = pf.iface_name.clone();
-                }
-            }
-        }
+        KeyCode::Enter => select_pf(sriov, probe),
         KeyCode::Char('r') => {
             sriov.scan_pfs();
         }
@@ -195,5 +212,139 @@ pub fn handle_input(sriov: &mut SriovState, key: KeyEvent) {
             sriov.editing_name.pop();
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::detect::{LinkState, PhysicalFunction};
+    use crate::ui::vf_config::rx_ring_over_max_warning;
+    use crate::vendor::NicVendor;
+    use perigee_core::mac::MacAddress;
+    use std::cell::{Cell, RefCell};
+
+    fn pf(iface: &str) -> PhysicalFunction {
+        PhysicalFunction {
+            iface_name: iface.to_string(),
+            pci_address: "0000:41:00.0".to_string(),
+            mac_address: MacAddress::ZERO,
+            vendor: NicVendor::Mellanox,
+            max_vfs: 8,
+            current_vfs: 0,
+            driver: "mlx5_core".to_string(),
+            link_state: LinkState::Up,
+            speed: None,
+        }
+    }
+
+    fn state_with_two_pfs() -> SriovState {
+        let mut sriov = SriovState::new();
+        sriov.detected_pfs = vec![pf("enp1s0"), pf("enp2s0")];
+        sriov
+    }
+
+    #[test]
+    fn choosing_a_pf_probes_that_pfs_interface() {
+        let mut sriov = state_with_two_pfs();
+        sriov.selected_pf = 1;
+        let seen = RefCell::new(Vec::<String>::new());
+        let probe = |iface: &str| {
+            seen.borrow_mut().push(iface.to_string());
+            Ok(RingState {
+                current: 512,
+                max: 4096,
+            })
+        };
+
+        handle_input_with(&mut sriov, KeyEvent::from(KeyCode::Enter), &probe);
+
+        assert_eq!(seen.into_inner(), vec!["enp2s0".to_string()]);
+        assert_eq!(
+            sriov.pf_ring_probe,
+            Some(Ok(RingState {
+                current: 512,
+                max: 4096
+            }))
+        );
+    }
+
+    #[test]
+    fn choosing_another_pf_replaces_the_cached_probe() {
+        let mut sriov = state_with_two_pfs();
+        let probe = |iface: &str| {
+            Ok(RingState {
+                current: 1,
+                max: if iface == "enp1s0" { 100 } else { 200 },
+            })
+        };
+
+        handle_input_with(&mut sriov, KeyEvent::from(KeyCode::Enter), &probe);
+        sriov.selected_pf = 1;
+        handle_input_with(&mut sriov, KeyEvent::from(KeyCode::Enter), &probe);
+
+        let max = sriov.pf_ring_probe.and_then(|r| r.ok()).map(|r| r.max);
+        assert_eq!(max, Some(200));
+    }
+
+    #[test]
+    fn a_stored_value_above_the_new_pfs_maximum_is_flagged_not_changed() {
+        let mut sriov = state_with_two_pfs();
+        let probe = |iface: &str| {
+            Ok(RingState {
+                current: 1024,
+                max: if iface == "enp1s0" { 8192 } else { 1024 },
+            })
+        };
+        handle_input_with(&mut sriov, KeyEvent::from(KeyCode::Enter), &probe);
+        let stored = Some(8192);
+        if let Some(profile) = sriov.editing_profile.as_mut() {
+            profile.rx_ring = stored;
+        }
+        let before = rx_ring_over_max_warning(stored, &sriov.pf_ring_probe);
+
+        sriov.selected_pf = 1;
+        handle_input_with(&mut sriov, KeyEvent::from(KeyCode::Enter), &probe);
+
+        assert_eq!(before, None, "8192 fits PF A");
+        let warning = rx_ring_over_max_warning(stored, &sriov.pf_ring_probe).unwrap_or_default();
+        assert!(
+            warning.contains("8192") && warning.contains("1024"),
+            "{warning}"
+        );
+        assert_eq!(
+            sriov.editing_profile.and_then(|p| p.rx_ring),
+            stored,
+            "the user's value is never rewritten"
+        );
+    }
+
+    #[test]
+    fn enter_without_detected_pfs_does_not_probe() {
+        let mut sriov = SriovState::new();
+        let called = Cell::new(false);
+        let probe = |_: &str| {
+            called.set(true);
+            Err("unused".to_string())
+        };
+
+        handle_input_with(&mut sriov, KeyEvent::from(KeyCode::Enter), &probe);
+
+        assert!(!called.get());
+    }
+
+    #[test]
+    fn typing_a_name_does_not_probe() {
+        let mut sriov = state_with_two_pfs();
+        let called = Cell::new(false);
+        let probe = |_: &str| {
+            called.set(true);
+            Err("unused".to_string())
+        };
+
+        handle_input_with(&mut sriov, KeyEvent::from(KeyCode::Char('x')), &probe);
+
+        assert!(!called.get());
+        assert_eq!(sriov.editing_name, "x");
     }
 }

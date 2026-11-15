@@ -2,11 +2,17 @@
 
 use tracing::info;
 
+use std::time::Duration;
+
 use crate::cmd::{CmdError, CMD_TIMEOUT};
 use crate::roce::StepError;
 
 /// Runs one external command; injectable for tests.
 type Runner<'a> = &'a dyn Fn(&str, &[&str]) -> Result<String, CmdError>;
+
+/// Limit for the read-only probe the TUI runs on the UI thread; the apply
+/// path's `CMD_TIMEOUT` would freeze the screen for too long.
+pub const RING_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// RX ring sizes reported by `ethtool -g`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,9 +138,65 @@ fn write_and_check(pf: &str, n: u32, live: bool, run: Runner, out: &mut RingOutc
     }
 }
 
+/// Read the PF's ring sizes with `ethtool -g` only (never writes).
+pub fn probe(pf: &str) -> Result<RingState, String> {
+    probe_with(pf, &|program, args| {
+        crate::cmd::run(program, args, RING_PROBE_TIMEOUT)
+    })
+}
+
+const MAX_PROBE_REASON_CHARS: usize = 80;
+
+/// Cut `text` to at most `max` characters, ending in `…` when shortened.
+pub fn truncate_reason(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let keep = max.saturating_sub(1);
+    let cut: String = text.chars().take(keep).collect();
+    if max == 0 {
+        cut
+    } else {
+        cut + "…"
+    }
+}
+
+/// Like `read`, but errors are a short cause for the TUI: no command line
+/// (it only repeats `ethtool -g <pf>`), so what is left is the actual reason.
+pub(crate) fn probe_with(pf: &str, run: Runner) -> Result<RingState, String> {
+    let out = run("ethtool", &["-g", pf]).map_err(|e| one_line(&short_cause(&e)))?;
+    parse_ring(&out).map_err(|e| one_line(&e))
+}
+
+fn short_cause(e: &CmdError) -> String {
+    match e {
+        CmdError::Spawn { source, .. } => format!("cannot run ethtool: {source}"),
+        CmdError::Io { source, .. } => format!("ethtool I/O error: {source}"),
+        CmdError::Failed { status, stderr, .. } if stderr.trim().is_empty() => {
+            format!("ethtool exited ({status})")
+        }
+        CmdError::Failed { stderr, .. } => stderr.clone(),
+        CmdError::TimedOut { .. } | CmdError::PipesOpen { .. } => "ethtool timed out".to_string(),
+    }
+}
+
+/// Collapse whitespace (stderr can span lines) and cap the length.
+fn one_line(text: &str) -> String {
+    let joined = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate_reason(&joined, MAX_PROBE_REASON_CHARS)
+}
+
 fn read(pf: &str, run: Runner) -> Result<RingState, StepError> {
     let out = run("ethtool", &["-g", pf])?;
     Ok(parse_ring(&out)?)
+}
+
+impl RingState {
+    /// The maximum as a usable limit: a device reporting 0 offers nothing to
+    /// compare against, so it counts as unknown.
+    pub fn known_max(&self) -> Option<u32> {
+        (self.max > 0).then_some(self.max)
+    }
 }
 
 impl RingOutcome {
@@ -180,6 +242,190 @@ TCP data split:\t\tn/a
         ETHTOOL_G
             .replacen("RX:\t\t\t8192", &format!("RX:\t\t\t{max}"), 1)
             .replacen("RX:\t\t\t1024", &format!("RX:\t\t\t{current}"), 1)
+    }
+
+    #[test]
+    fn probe_returns_the_ring_state_from_ethtool_g() {
+        let run = |_: &str, _: &[&str]| Ok(ETHTOOL_G.to_string());
+
+        let state = probe_with(PF, &run);
+
+        assert_eq!(
+            state,
+            Ok(RingState {
+                current: 1024,
+                max: 8192
+            })
+        );
+    }
+
+    #[test]
+    fn probe_runs_exactly_ethtool_dash_g_on_the_pf() {
+        let calls = RefCell::new(Vec::<(String, Vec<String>)>::new());
+        let run = |program: &str, args: &[&str]| {
+            calls.borrow_mut().push((
+                program.to_string(),
+                args.iter().map(|a| a.to_string()).collect(),
+            ));
+            Ok(ETHTOOL_G.to_string())
+        };
+
+        let _ = probe_with(PF, &run);
+
+        assert_eq!(
+            calls.into_inner(),
+            vec![(
+                "ethtool".to_string(),
+                vec!["-g".to_string(), PF.to_string()]
+            )]
+        );
+    }
+
+    #[test]
+    fn probe_error_is_short_and_non_empty() {
+        let spawn_failure = |_: &str, _: &[&str]| -> Result<String, CmdError> {
+            Err(CmdError::Spawn {
+                cmd: "ethtool -g x".to_string(),
+                source: std::io::Error::other("y".repeat(500)),
+            })
+        };
+        let timeout = |_: &str, _: &[&str]| -> Result<String, CmdError> {
+            Err(CmdError::TimedOut {
+                cmd: "ethtool -g x".to_string(),
+                timeout: RING_PROBE_TIMEOUT,
+            })
+        };
+
+        for reason in [
+            probe_with(PF, &spawn_failure).unwrap_err(),
+            probe_with(PF, &timeout).unwrap_err(),
+        ] {
+            assert!(!reason.is_empty());
+            assert!(reason.chars().count() <= MAX_PROBE_REASON_CHARS, "{reason}");
+        }
+    }
+
+    #[test]
+    fn probe_reports_unparseable_output_with_the_parser_message() {
+        let output = "Ring parameters for x:\n";
+        let run = |_: &str, _: &[&str]| Ok(output.to_string());
+
+        assert_eq!(probe_with(PF, &run), parse_ring(output));
+        assert!(probe_with(PF, &run).is_err_and(|e| !e.is_empty()));
+    }
+
+    fn failing(error: fn() -> CmdError) -> impl Fn(&str, &[&str]) -> Result<String, CmdError> {
+        move |_, _| Err(error())
+    }
+
+    fn spawn_error() -> CmdError {
+        CmdError::Spawn {
+            cmd: "ethtool -g enp65s0np0".to_string(),
+            source: std::io::Error::from_raw_os_error(2),
+        }
+    }
+
+    #[test]
+    fn probe_spawn_failure_names_the_io_error_not_the_command_line() {
+        let reason = probe_with(PF, &failing(spawn_error)).unwrap_err();
+
+        assert!(reason.starts_with("cannot run ethtool: "), "{reason}");
+        assert!(reason.contains("No such file"), "{reason}");
+        assert!(!reason.contains("-g"), "{reason}");
+    }
+
+    #[test]
+    fn probe_io_error_names_the_io_error() {
+        let io = || CmdError::Io {
+            cmd: "ethtool -g enp65s0np0".to_string(),
+            source: std::io::Error::other("broken pipe"),
+        };
+
+        let reason = probe_with(PF, &failing(io)).unwrap_err();
+
+        assert!(reason.contains("broken pipe"), "{reason}");
+        assert!(!reason.contains("-g"), "{reason}");
+    }
+
+    #[test]
+    fn probe_timeout_says_ethtool_timed_out() {
+        let timeout = || CmdError::TimedOut {
+            cmd: "ethtool -g enp65s0np0".to_string(),
+            timeout: RING_PROBE_TIMEOUT,
+        };
+
+        let reason = probe_with(PF, &failing(timeout)).unwrap_err();
+
+        assert_eq!(reason, "ethtool timed out");
+    }
+
+    #[cfg(unix)]
+    fn failed(stderr: &str) -> CmdError {
+        use std::os::unix::process::ExitStatusExt;
+        CmdError::Failed {
+            cmd: "ethtool -g enp65s0np0".to_string(),
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stderr: stderr.to_string(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_failed_exit_reports_stderr_on_one_line() {
+        let run = |_: &str, _: &[&str]| -> Result<String, CmdError> {
+            Err(failed("netlink error: Operation not supported\n"))
+        };
+
+        let reason = probe_with(PF, &run).unwrap_err();
+
+        assert_eq!(reason, "netlink error: Operation not supported");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_failed_exit_with_empty_stderr_reports_the_status() {
+        let run = |_: &str, _: &[&str]| -> Result<String, CmdError> { Err(failed("  \n")) };
+
+        let reason = probe_with(PF, &run).unwrap_err();
+
+        assert!(reason.starts_with("ethtool exited"), "{reason}");
+        assert!(reason.contains('1'), "{reason}");
+    }
+
+    #[test]
+    fn known_max_treats_zero_as_unknown() {
+        let ring = |max| RingState { current: 1, max };
+
+        assert_eq!(ring(8192).known_max(), Some(8192));
+        assert_eq!(ring(1).known_max(), Some(1));
+        assert_eq!(ring(0).known_max(), None);
+    }
+
+    #[test]
+    fn truncate_reason_counts_characters_not_bytes() {
+        let cut = truncate_reason("网卡不支持环形缓冲区查询", 5);
+
+        assert_eq!(cut, "网卡不支…");
+        assert_eq!(truncate_reason("网卡不支持", 5), "网卡不支持");
+        assert_eq!(truncate_reason("……………", 3), "………");
+        assert_eq!(truncate_reason("a…b…c…d", 4), "a…b…");
+    }
+
+    #[test]
+    fn truncate_reason_handles_empty_text_and_zero_width() {
+        assert_eq!(truncate_reason("", 5), "");
+        assert_eq!(truncate_reason("", 0), "");
+        assert_eq!(truncate_reason("abc", 0), "");
+        assert_eq!(truncate_reason("abc", 1), "…");
+        assert_eq!(truncate_reason("a", 1), "a");
+    }
+
+    #[test]
+    fn truncate_reason_keeps_short_text_and_marks_cut_text() {
+        assert_eq!(truncate_reason("short", 10), "short");
+        let cut = truncate_reason("abcdefghij", 5);
+        assert_eq!(cut.chars().count(), 5);
+        assert!(cut.ends_with('…'), "{cut}");
     }
 
     #[test]

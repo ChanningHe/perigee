@@ -182,9 +182,10 @@ typo, and then no profile is applied.
   inherited from the PF.
 
 In the TUI, edit it on the General tab (`PF RX ring`): type a number, or clear
-the field for unmanaged. `0` and values above the u32 range are refused; the
-device maximum is checked at apply time. The review summary shows it when set,
-and `perigee sriov show` prints it.
+the field for unmanaged. `0` and values above the u32 range are refused. The
+field shows the device maximum when `ethtool -g` can be read (read once when
+the editor opens or a PF is chosen) and refuses larger values; apply still
+checks. The review summary shows it when set, and `perigee sriov show` prints it.
 
 ### PF RoCE / lossless Ethernet (`roce`, opt-in, mlx5 only)
 

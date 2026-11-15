@@ -10,6 +10,7 @@ use ratatui::{
 
 use super::{EditFocus, SriovState};
 use crate::config::MacStrategyConfig;
+use crate::pf_ring::RingState;
 
 // ── General tab fields ──
 
@@ -21,6 +22,12 @@ const FIELD_SPOOFCHK: usize = 3;
 const FIELD_LINK_STATE: usize = 4;
 const FIELD_RX_RING: usize = 5;
 /// Shown on its own row under the field: a long hint would be clipped at 80 columns.
+const RING_MAX_UNKNOWN: &str = "Device max unknown";
+const PF_NOT_FOUND: &str = "PF not found on this host";
+const CHOOSE_PF: &str = "choose a PF on the PF tab";
+const MAX_REPORTED_ZERO: &str = "device reports 0";
+/// 80 columns - 2 border - 3 indent - "Device max unknown ()" (21).
+const MAX_RING_REASON_CHARS: usize = 54;
 const RX_RING_HINT: &str = "Empty = unmanaged. A live change briefly drops the PF link.";
 
 /// Value style shared by the field rows: editing beats selected beats plain.
@@ -168,11 +175,25 @@ pub fn render_general(frame: &mut Frame, sriov: &SriovState, area: Rect) {
             "",
         ),
     ];
-    if cursor == FIELD_RX_RING {
+    if let Some(warning) = rx_ring_over_max_warning(
+        profile.as_ref().and_then(|p| p.rx_ring),
+        &sriov.pf_ring_probe,
+    ) {
         lines.push(Line::from(Span::styled(
-            format!("   {RX_RING_HINT}"),
-            common::style_muted(),
+            format!("   {warning}"),
+            common::style_warn(),
         )));
+    }
+    if cursor == FIELD_RX_RING {
+        for text in [
+            RX_RING_HINT.to_string(),
+            ring_max_text(&sriov.pf_ring_probe, pf_chosen(sriov)),
+        ] {
+            lines.push(Line::from(Span::styled(
+                format!("   {text}"),
+                common::style_muted(),
+            )));
+        }
     }
 
     let para = Paragraph::new(lines).block(
@@ -265,6 +286,52 @@ pub fn handle_general_input(sriov: &mut SriovState, key: KeyEvent) {
     }
 }
 
+/// The "Device max" row. Rows must fit 80 columns: 2 border + 3 indent leave
+/// 75 for this text, so a long failure reason is cut.
+fn ring_max_text(probe: &Option<Result<RingState, String>>, pf_chosen: bool) -> String {
+    match probe {
+        Some(Ok(ring)) => match ring.known_max() {
+            Some(max) => format!("Device max {max}, current {}", ring.current),
+            None => format!("{RING_MAX_UNKNOWN} ({MAX_REPORTED_ZERO})"),
+        },
+        Some(Err(reason)) => {
+            let reason = crate::pf_ring::truncate_reason(reason, MAX_RING_REASON_CHARS);
+            format!("{RING_MAX_UNKNOWN} ({reason})")
+        }
+        None if pf_chosen => format!("{RING_MAX_UNKNOWN} ({PF_NOT_FOUND})"),
+        None => format!("{RING_MAX_UNKNOWN} ({CHOOSE_PF})"),
+    }
+}
+
+/// A profile with a real MAC has a PF behind it; a new profile's zero MAC
+/// (or no profile at all) means none was chosen yet.
+fn pf_chosen(sriov: &SriovState) -> bool {
+    sriov
+        .editing_profile
+        .as_ref()
+        .is_some_and(|p| p.mac != perigee_core::mac::MacAddress::ZERO)
+}
+
+/// Warning shown when a stored `rx_ring` is above a known device maximum
+/// (PF changed after typing the value, or a hand-edited file). The value is
+/// never changed silently. Shared by the General and Review tabs.
+pub(super) fn rx_ring_over_max_warning(
+    rx_ring: Option<u32>,
+    probe: &Option<Result<RingState, String>>,
+) -> Option<String> {
+    let n = rx_ring?;
+    let max = known_ring_max(probe)?;
+    (n > max).then(|| format!("⚠ RX ring {n} exceeds device max {max}; apply will refuse it"))
+}
+
+/// The device maximum, when a probe succeeded and the device reported one.
+fn known_ring_max(probe: &Option<Result<RingState, String>>) -> Option<u32> {
+    match probe {
+        Some(Ok(ring)) => ring.known_max(),
+        _ => None,
+    }
+}
+
 fn start_rx_ring_edit(sriov: &mut SriovState) {
     sriov.rx_ring_buf = sriov
         .editing_profile
@@ -296,7 +363,7 @@ fn handle_rx_ring_edit(sriov: &mut SriovState, key: KeyEvent) {
 /// explains why in the message line; the edit ends either way.
 fn commit_rx_ring(sriov: &mut SriovState) {
     sriov.edit_focus = None;
-    match parse_rx_ring(&sriov.rx_ring_buf) {
+    match parse_rx_ring(&sriov.rx_ring_buf, known_ring_max(&sriov.pf_ring_probe)) {
         Ok(value) => {
             if let Some(profile) = sriov.editing_profile.as_mut() {
                 profile.rx_ring = value;
@@ -308,14 +375,18 @@ fn commit_rx_ring(sriov: &mut SriovState) {
     sriov.rx_ring_buf.clear();
 }
 
-/// Empty means unmanaged. The device maximum is checked at apply time, not here.
-fn parse_rx_ring(text: &str) -> Result<Option<u32>, String> {
+/// Empty means unmanaged. With a known device maximum, larger values are
+/// refused here; when it is unknown the apply step still checks.
+fn parse_rx_ring(text: &str, device_max: Option<u32>) -> Result<Option<u32>, String> {
     if text.is_empty() {
         return Ok(None);
     }
     match text.parse::<u32>() {
         Ok(0) => Err("RX ring must be greater than 0 (clear the field for unmanaged)".to_string()),
-        Ok(n) => Ok(Some(n)),
+        Ok(n) => match device_max {
+            Some(max) if n > max => Err(format!("RX ring {n} exceeds the device maximum {max}")),
+            _ => Ok(Some(n)),
+        },
         Err(_) => Err(format!("RX ring must be at most {}", u32::MAX)),
     }
 }
@@ -714,6 +785,7 @@ pub(super) fn ensure_editing_profile(sriov: &mut SriovState) {
 #[cfg(test)]
 mod rx_ring_tests {
     use super::*;
+    use crate::cmd::CmdError;
 
     fn press(sriov: &mut SriovState, code: KeyCode) {
         handle_general_input(sriov, KeyEvent::from(code));
@@ -908,6 +980,290 @@ mod rx_ring_tests {
         press(&mut sriov, KeyCode::Enter);
         type_text(&mut sriov, "1");
         assert!(general_screen(&sriov).contains("[40961▎]"));
+    }
+
+    fn ring(current: u32, max: u32) -> Option<Result<RingState, String>> {
+        Some(Ok(RingState { current, max }))
+    }
+
+    #[test]
+    fn ring_max_row_shows_the_probed_numbers() {
+        let mut sriov = state_with(None);
+        sriov.pf_ring_probe = ring(1024, 8192);
+
+        let text = general_screen_at(&sriov, 80);
+
+        assert!(text.contains("Device max 8192, current 1024"), "{text}");
+        assert!(
+            text.contains("Empty = unmanaged"),
+            "the hint row stays: {text}"
+        );
+    }
+
+    #[test]
+    fn ring_max_row_says_unknown_when_the_probe_failed() {
+        let mut sriov = state_with(None);
+        sriov.pf_ring_probe = Some(Err("ethtool not installed".to_string()));
+
+        let text = general_screen_at(&sriov, 80);
+
+        assert!(
+            text.contains("Device max unknown (ethtool not installed)"),
+            "{text}"
+        );
+        assert!(text.contains("Empty = unmanaged"), "{text}");
+    }
+
+    fn choose_mac(sriov: &mut SriovState) {
+        if let Some(profile) = sriov.editing_profile.as_mut() {
+            profile.mac = perigee_core::mac::MacAddress([2, 0, 0, 0, 0, 1]);
+        }
+    }
+
+    #[test]
+    fn profile_whose_mac_resolves_to_no_interface_says_pf_not_found() {
+        let mut sriov = state_with(None);
+        choose_mac(&mut sriov);
+
+        let text = general_screen_at(&sriov, 80);
+
+        assert!(
+            text.contains("Device max unknown (PF not found on this host)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn new_profile_without_a_pf_says_to_choose_one() {
+        let zero_mac = state_with(None);
+        let mut no_profile = state_with(None);
+        no_profile.editing_profile = None;
+
+        for sriov in [&zero_mac, &no_profile] {
+            let text = general_screen_at(sriov, 80);
+
+            assert!(
+                text.contains("Device max unknown (choose a PF on the PF tab)"),
+                "{text}"
+            );
+            assert!(!text.contains("PF not found"), "{text}");
+        }
+    }
+
+    fn reason_row_at_80_columns(error: CmdError) -> String {
+        let run = move |_: &str, _: &[&str]| -> Result<String, CmdError> {
+            Err(match &error {
+                CmdError::Spawn { cmd, .. } => CmdError::Spawn {
+                    cmd: cmd.clone(),
+                    source: std::io::Error::from_raw_os_error(2),
+                },
+                CmdError::TimedOut { cmd, timeout } => CmdError::TimedOut {
+                    cmd: cmd.clone(),
+                    timeout: *timeout,
+                },
+                other => panic!("unsupported fixture {other:?}"),
+            })
+        };
+        let mut sriov = state_with(None);
+        choose_mac(&mut sriov);
+        sriov.pf_ring_probe = Some(crate::pf_ring::probe_with("enp65s0np0", &run));
+        general_screen_at(&sriov, 80)
+    }
+
+    #[test]
+    fn missing_ethtool_shows_the_io_error_at_80_columns() {
+        let text = reason_row_at_80_columns(CmdError::Spawn {
+            cmd: "ethtool -g enp65s0np0".to_string(),
+            source: std::io::Error::from_raw_os_error(2),
+        });
+
+        assert!(
+            text.contains("Device max unknown (cannot run ethtool: No such file"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn hung_ethtool_shows_timed_out_at_80_columns() {
+        let text = reason_row_at_80_columns(CmdError::TimedOut {
+            cmd: "ethtool -g enp65s0np0".to_string(),
+            timeout: crate::pf_ring::RING_PROBE_TIMEOUT,
+        });
+
+        assert!(
+            text.contains("Device max unknown (ethtool timed out)"),
+            "{text}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failing_ethtool_shows_its_stderr_at_80_columns() {
+        use std::os::unix::process::ExitStatusExt;
+        let run = |_: &str, _: &[&str]| -> Result<String, CmdError> {
+            Err(CmdError::Failed {
+                cmd: "ethtool -g enp65s0np0".to_string(),
+                status: std::process::ExitStatus::from_raw(1 << 8),
+                stderr: "netlink error: Operation not supported\n".to_string(),
+            })
+        };
+        let mut sriov = state_with(None);
+        choose_mac(&mut sriov);
+        sriov.pf_ring_probe = Some(crate::pf_ring::probe_with("enp65s0np0", &run));
+
+        let text = general_screen_at(&sriov, 80);
+
+        assert!(
+            text.contains("Device max unknown (netlink error: Operation not supported)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_reported_maximum_of_zero_is_unknown_and_accepts_any_value() {
+        let mut sriov = state_with(None);
+        sriov.pf_ring_probe = ring(1024, 0);
+
+        let text = general_screen_at(&sriov, 80);
+        commit(&mut sriov, "16384");
+
+        assert!(
+            text.contains("Device max unknown (device reports 0)"),
+            "{text}"
+        );
+        assert_eq!(rx_ring(&sriov), Some(16384));
+        assert_eq!(sriov.message, None);
+    }
+
+    #[test]
+    fn warning_appears_only_when_the_value_exceeds_a_known_maximum() {
+        let warn =
+            |rx, probe: Option<Result<RingState, String>>| rx_ring_over_max_warning(rx, &probe);
+
+        let above = warn(Some(8192), ring(1024, 1024)).unwrap_or_default();
+        assert!(above.contains("8192") && above.contains("1024"), "{above}");
+        assert!(above.contains("apply will refuse it"), "{above}");
+        assert_eq!(warn(Some(1024), ring(1024, 1024)), None, "equal to max");
+        assert_eq!(warn(Some(1), ring(1024, 1024)), None, "below max");
+        assert_eq!(warn(Some(9000), None), None, "no probe");
+        assert_eq!(
+            warn(Some(9000), Some(Err("x".to_string()))),
+            None,
+            "failed probe"
+        );
+        assert_eq!(warn(Some(9000), ring(1024, 0)), None, "max reported as 0");
+        assert_eq!(warn(None, ring(1024, 1024)), None, "unmanaged");
+    }
+
+    #[test]
+    fn the_warning_fits_80_columns_with_the_widest_numbers() {
+        let warning =
+            rx_ring_over_max_warning(Some(u32::MAX), &ring(1, u32::MAX - 1)).unwrap_or_default();
+
+        assert!(warning.chars().count() + 3 + 2 <= 80, "{warning}");
+    }
+
+    #[test]
+    fn general_tab_warns_whatever_the_cursor_position() {
+        let mut sriov = state_with(Some(8192));
+        sriov.pf_ring_probe = ring(1024, 1024);
+        sriov.general_cursor = FIELD_VF_COUNT;
+
+        let text = general_screen_at(&sriov, 80);
+
+        assert!(
+            text.contains("RX ring 8192 exceeds device max 1024; apply will refuse it"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn general_tab_has_no_warning_when_unmanaged_or_within_the_maximum() {
+        for rx in [None, Some(1024), Some(512)] {
+            let mut sriov = state_with(rx);
+            sriov.pf_ring_probe = ring(1024, 1024);
+
+            let text = general_screen_at(&sriov, 80);
+
+            assert!(!text.contains("exceeds device max"), "{rx:?}: {text}");
+        }
+    }
+
+    #[test]
+    fn a_very_long_reason_is_cut_so_the_row_fits_80_columns() {
+        let mut sriov = state_with(None);
+        sriov.pf_ring_probe = Some(Err("x".repeat(500)));
+
+        let row = ring_max_text(&sriov.pf_ring_probe, true);
+        let text = general_screen_at(&sriov, 80);
+
+        assert!(row.starts_with("Device max unknown ("), "{row}");
+        assert!(row.ends_with(')'), "{row}");
+        // 3 columns of indent plus the two border columns.
+        assert!(row.chars().count() + 3 + 2 <= 80, "{row}");
+        assert!(text.contains(&row), "the whole row is visible: {text}");
+    }
+
+    #[test]
+    fn ring_max_row_is_hidden_when_the_cursor_is_elsewhere() {
+        let mut sriov = state_with(None);
+        sriov.pf_ring_probe = ring(1024, 8192);
+        sriov.general_cursor = FIELD_VF_COUNT;
+
+        let text = general_screen_at(&sriov, 80);
+
+        assert!(!text.contains("Device max"), "{text}");
+    }
+
+    #[test]
+    fn a_value_equal_to_the_known_maximum_is_accepted() {
+        let mut sriov = state_with(None);
+        sriov.pf_ring_probe = ring(1024, 8192);
+
+        commit(&mut sriov, "8192");
+
+        assert_eq!(rx_ring(&sriov), Some(8192));
+        assert_eq!(sriov.message, None);
+    }
+
+    #[test]
+    fn a_value_above_the_known_maximum_is_rejected_naming_both_numbers() {
+        let mut sriov = state_with(Some(1024));
+        sriov.pf_ring_probe = ring(1024, 8192);
+
+        commit(&mut sriov, "8193");
+
+        assert_eq!(rx_ring(&sriov), Some(1024));
+        assert_eq!(sriov.edit_focus, None);
+        let message = sriov.message.unwrap_or_default();
+        assert!(
+            message.contains("8193") && message.contains("8192"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn clearing_to_unmanaged_is_accepted_whatever_the_maximum() {
+        let mut sriov = state_with(Some(1024));
+        sriov.pf_ring_probe = ring(1024, 8192);
+
+        commit(&mut sriov, "");
+
+        assert_eq!(rx_ring(&sriov), None);
+        assert_eq!(sriov.message, None);
+    }
+
+    #[test]
+    fn an_unknown_maximum_accepts_any_value() {
+        for probe in [None, Some(Err("no ethtool".to_string()))] {
+            let mut sriov = state_with(None);
+            sriov.pf_ring_probe = probe;
+
+            commit(&mut sriov, "16384");
+
+            assert_eq!(rx_ring(&sriov), Some(16384));
+            assert_eq!(sriov.message, None);
+        }
     }
 
     #[test]
