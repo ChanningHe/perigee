@@ -236,6 +236,10 @@ impl SriovState {
     }
 
     pub fn save_config(&mut self) -> Result<(), String> {
+        self.save_config_to(&sriov_config_path())
+    }
+
+    fn save_config_to(&mut self, path: &std::path::Path) -> Result<(), String> {
         let profile = self
             .editing_profile
             .as_ref()
@@ -247,11 +251,10 @@ impl SriovState {
             self.editing_name.trim().to_string()
         };
 
-        let path = sriov_config_path();
         let mut file_config = if path.exists() {
             // Never clobber an existing config we cannot parse — that would drop
             // every other profile in the file. Abort and let the user fix it.
-            SriovFileConfig::load(&path).map_err(|e| {
+            SriovFileConfig::load(path).map_err(|e| {
                 format!("Refusing to overwrite unreadable {}: {}", path.display(), e)
             })?
         } else {
@@ -262,7 +265,7 @@ impl SriovState {
 
         file_config.sriov.insert(name.clone(), profile);
         file_config
-            .save(&path)
+            .save(path)
             .map_err(|e| format!("Failed to save: {}", e))?;
 
         self.profiles = file_config.sriov.into_iter().collect();
@@ -580,8 +583,8 @@ pub fn render_status(
             lines.push(section_hdr("── VF Status ──"));
             lines.push(Line::from(Span::styled(
                 format!(
-                    "  {:>4}  {:<14} {:<26} {:<6} {:<8} {:<8} {:<10} {}",
-                    "VF#", "PCI Addr", "MAC", "Trust", "Spoof", "VLAN", "Status", "Used By"
+                    "  {:>4}  {:<14} {:<26} {:<6} {:<8} {:<8} {:<8} {:<10} {}",
+                    "VF#", "PCI Addr", "MAC", "Trust", "Spoof", "Link", "VLAN", "Status", "Used By"
                 ),
                 common::style_muted(),
             )));
@@ -621,12 +624,13 @@ pub fn render_status(
                 lines.push(Line::from(vec![
                     Span::styled(
                         format!(
-                            "  {:>4}  {:<14} {:<26} {:<6} {:<8} {:<8} ",
+                            "  {:>4}  {:<14} {:<26} {:<6} {:<8} {:<8} {:<8} ",
                             vf.index,
                             pci_str,
                             mac_display,
                             if vf.configured.trust { "✓" } else { "✗" },
                             if vf.configured.spoofchk { "✓" } else { "✗" },
+                            vf.configured.link_state.as_deref().unwrap_or("-"),
                             vlan_str,
                         ),
                         Style::default().fg(common::TEXT_DIM),
@@ -1158,5 +1162,129 @@ async fn do_save_and_apply(sriov: &mut SriovState) {
             sriov.message = Some(format!("✗ Save failed: {}", e));
             sriov.active_tab = EditorTab::Review;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{RoceConfig, VfLinkState};
+    use crossterm::event::KeyEvent;
+
+    const EXISTING: &str = r#"
+[sriov.edited]
+mac = "8c:2a:8e:88:9a:f6"
+num_vfs = 8
+
+[sriov.edited.defaults]
+trust = true
+spoofchk = false
+link_state = "enable"
+
+[[sriov.edited.vf]]
+index = 3
+link_state = "disable"
+
+[sriov.edited.roce]
+enabled = true
+dscp = 24
+pfc_storm_timeout_ms = 200
+
+[sriov.other]
+mac = "8c:2a:8e:88:9a:f7"
+num_vfs = 2
+
+[sriov.other.roce]
+enabled = false
+"#;
+
+    /// Editing an unrelated field in the TUI and saving must keep link_state
+    /// (defaults and override) and the roce section of every profile.
+    #[test]
+    fn tui_save_preserves_link_state_and_roce() {
+        let dir = std::env::temp_dir().join(format!("perigee-tui-rt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sriov.toml");
+        std::fs::write(&path, EXISTING).unwrap();
+
+        let loaded = SriovFileConfig::load(&path).unwrap();
+        let mut sriov = SriovState::new();
+        sriov.editing_name = "edited".to_string();
+        sriov.editing_profile = Some(loaded.sriov["edited"].clone());
+
+        // Toggle default trust on the General tab, and VF 0's trust override.
+        sriov.general_cursor = 2;
+        vf_config::handle_general_input(&mut sriov, KeyEvent::from(KeyCode::Enter));
+        vf_config::handle_vf_table_input(&mut sriov, KeyEvent::from(KeyCode::Char('t')));
+        sriov.save_config_to(&path).unwrap();
+
+        let saved = SriovFileConfig::load(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let edited = &saved.sriov["edited"];
+        assert!(!edited.defaults.trust, "the edit itself was saved");
+        assert_eq!(edited.defaults.link_state, Some(VfLinkState::Enable));
+        let vf3 = edited.vf.iter().find(|o| o.index == 3).unwrap();
+        assert_eq!(vf3.link_state, Some(VfLinkState::Disable));
+        let vf0 = edited.vf.iter().find(|o| o.index == 0).unwrap();
+        assert_eq!(vf0.link_state, None);
+        assert_eq!(
+            edited.roce,
+            Some(RoceConfig {
+                enabled: true,
+                dscp: 24,
+                pfc_storm_timeout_ms: 200,
+                ..RoceConfig::default()
+            })
+        );
+        assert_eq!(
+            saved.sriov["other"].roce,
+            Some(RoceConfig::default()),
+            "other profiles are untouched"
+        );
+    }
+
+    #[test]
+    fn tui_save_does_not_add_link_state_to_a_file_without_it() {
+        let dir = std::env::temp_dir().join(format!("perigee-tui-legacy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sriov.toml");
+        let legacy = "[sriov.p]\nmac = \"8c:2a:8e:88:9a:f6\"\nnum_vfs = 4\n\n[sriov.p.defaults]\ntrust = true\nspoofchk = false\n";
+        std::fs::write(&path, legacy).unwrap();
+
+        let mut sriov = SriovState::new();
+        sriov.editing_name = "p".to_string();
+        sriov.editing_profile = Some(SriovFileConfig::load(&path).unwrap().sriov["p"].clone());
+        vf_config::handle_vf_table_input(&mut sriov, KeyEvent::from(KeyCode::Char('t')));
+        sriov.save_config_to(&path).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(!text.contains("link_state"), "{text}");
+        assert!(!text.contains("roce"), "{text}");
+    }
+
+    #[test]
+    fn tui_link_state_controls_cycle_from_unmanaged() {
+        let mut sriov = SriovState::new();
+        sriov.editing_name = "p".to_string();
+        sriov.editing_profile =
+            Some(toml::from_str::<SriovFileConfig>(EXISTING).unwrap().sriov["other"].clone());
+        assert_eq!(
+            sriov.editing_profile.as_ref().unwrap().defaults.link_state,
+            None
+        );
+
+        sriov.general_cursor = 4;
+        vf_config::handle_general_input(&mut sriov, KeyEvent::from(KeyCode::Enter));
+        let profile = sriov.editing_profile.as_ref().unwrap();
+        assert_eq!(profile.defaults.link_state, Some(VfLinkState::Auto));
+
+        // The VF override cycles on its own: unset -> auto.
+        sriov.vf_table_cursor = 1;
+        vf_config::handle_vf_table_input(&mut sriov, KeyEvent::from(KeyCode::Char('l')));
+        let profile = sriov.editing_profile.as_ref().unwrap();
+        let vf1 = profile.vf.iter().find(|o| o.index == 1).unwrap();
+        assert_eq!(vf1.link_state, Some(VfLinkState::Auto));
     }
 }

@@ -176,6 +176,7 @@ pub fn handle_input(sriov: &mut SriovState, key: KeyEvent) {
                         defaults: crate::config::VfDefaults::default(),
                         vf: Vec::new(),
                         fdb: crate::config::FdbConfig::default(),
+                        roce: None,
                     });
                 }
                 if sriov.editing_name.is_empty() {

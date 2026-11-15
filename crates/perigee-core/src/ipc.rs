@@ -132,6 +132,10 @@ pub struct VfSnapshot {
     pub spoofchk: bool,
     pub vlan_id: Option<u16>,
     pub vlan_qos: Option<u8>,
+    /// VF link state (auto/enable/disable). `None` from older daemons, or in
+    /// `actual` when the driver does not report it.
+    #[serde(default)]
+    pub link_state: Option<String>,
 }
 
 /// A single managed FDB entry: a VM MAC the daemon injected into the PF's FDB,

@@ -13,11 +13,12 @@ use crate::config::MacStrategyConfig;
 
 // ── General tab fields ──
 
-const GENERAL_FIELDS: usize = 4;
+const GENERAL_FIELDS: usize = 5;
 const FIELD_VF_COUNT: usize = 0;
 const FIELD_MAC_STRATEGY: usize = 1;
 const FIELD_TRUST: usize = 2;
 const FIELD_SPOOFCHK: usize = 3;
+const FIELD_LINK_STATE: usize = 4;
 
 pub fn render_general(frame: &mut Frame, sriov: &SriovState, area: Rect) {
     let profile = &sriov.editing_profile;
@@ -45,6 +46,10 @@ pub fn render_general(frame: &mut Frame, sriov: &SriovState, area: Rect) {
         .as_ref()
         .map(|p| p.defaults.spoofchk)
         .unwrap_or(false);
+    let link_state = profile
+        .as_ref()
+        .and_then(|p| p.defaults.link_state)
+        .map_or("unmanaged", |s| s.as_str());
 
     let field_line =
         |idx: usize, label: &str, value: &str, is_editing: bool, hint: &str| -> Line<'static> {
@@ -117,6 +122,14 @@ pub fn render_general(frame: &mut Frame, sriov: &SriovState, area: Rect) {
             if spoofchk { "ON" } else { "OFF" },
             false,
             "Enter to toggle",
+        ),
+        Line::from(""),
+        field_line(
+            FIELD_LINK_STATE,
+            "Link State:",
+            link_state,
+            false,
+            "Enter to cycle (unmanaged leaves VFs as they are)",
         ),
     ];
 
@@ -191,6 +204,12 @@ pub fn handle_general_input(sriov: &mut SriovState, key: KeyEvent) {
                         profile.defaults.spoofchk = !profile.defaults.spoofchk;
                     }
                 }
+                FIELD_LINK_STATE => {
+                    if let Some(ref mut profile) = sriov.editing_profile {
+                        profile.defaults.link_state =
+                            crate::config::next_link_state(profile.defaults.link_state);
+                    }
+                }
                 _ => {}
             }
         }
@@ -213,13 +232,13 @@ pub fn render_vf_table(frame: &mut Frame, sriov: &SriovState, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
         format!(
-            "   {:>3}  {:<14} {:<18} {:<6} {:<9} {:<6} {:<10} {}",
-            "VF#", "PCI Addr", "MAC", "Trust", "SpoofChk", "VLAN", "Used By", "Override"
+            "   {:>3}  {:<14} {:<18} {:<6} {:<9} {:<8} {:<6} {:<10} {}",
+            "VF#", "PCI Addr", "MAC", "Trust", "SpoofChk", "Link", "VLAN", "Used By", "Override"
         ),
         common::style_muted(),
     )));
     lines.push(Line::from(Span::styled(
-        format!("   {}", "─".repeat(84)),
+        format!("   {}", "─".repeat(93)),
         Style::default().fg(common::BORDER),
     )));
 
@@ -247,6 +266,10 @@ pub fn render_vf_table(frame: &mut Frame, sriov: &SriovState, area: Rect) {
             let spoof_val = vf_override
                 .and_then(|o| o.spoofchk)
                 .unwrap_or(profile.defaults.spoofchk);
+            let link_val = vf_override
+                .and_then(|o| o.link_state)
+                .or(profile.defaults.link_state)
+                .map_or("-", |s| s.as_str());
             let pci = pf_iface.and_then(|pf| perigee_core::sysfs::read_vf_pci_addr(pf, i as u32));
             let pci_str = pci.as_deref().unwrap_or("-").to_string();
             // "Used By" colored span: green if the referencing VM is running.
@@ -302,13 +325,14 @@ pub fn render_vf_table(frame: &mut Frame, sriov: &SriovState, area: Rect) {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(
-                        "{}{:>3}  {:<14} {:<18} {:<6} {:<9} {:<6} ",
+                        "{}{:>3}  {:<14} {:<18} {:<6} {:<9} {:<8} {:<6} ",
                         indicator,
                         i,
                         pci_str,
                         mac_str,
                         if trust_val { "✓" } else { "✗" },
                         if spoof_val { "✓" } else { "✗" },
+                        link_val,
                         vlan_str,
                     ),
                     style,
@@ -376,6 +400,14 @@ pub fn render_vf_table(frame: &mut Frame, sriov: &SriovState, area: Rect) {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(" spoofchk  ", common::style_muted()),
+                Span::styled(
+                    " l ",
+                    Style::default()
+                        .fg(common::KEY_FG)
+                        .bg(common::KEY_BG)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" link  ", common::style_muted()),
                 Span::styled(
                     " v ",
                     Style::default()
@@ -445,6 +477,7 @@ pub fn handle_vf_table_input(sriov: &mut SriovState, key: KeyEvent) {
                                 trust: None,
                                 spoofchk: None,
                                 vlan: Some(vlan),
+                                link_state: None,
                             });
                             profile.vf.sort_by_key(|o| o.index);
                         }
@@ -498,6 +531,12 @@ pub fn handle_vf_table_input(sriov: &mut SriovState, key: KeyEvent) {
                 o.spoofchk = Some(!current);
             });
         }
+        KeyCode::Char('l') => {
+            // Cycles the override itself; unset inherits the profile default.
+            toggle_vf_field(sriov, |o, _| {
+                o.link_state = crate::config::next_link_state(o.link_state);
+            });
+        }
         KeyCode::Char('v') => {
             let vf_idx = sriov.vf_table_cursor as u32;
             let current_vlan = sriov
@@ -545,6 +584,7 @@ fn toggle_vf_field(
                 trust: None,
                 spoofchk: None,
                 vlan: None,
+                link_state: None,
             };
             f(&mut new_override, &defaults);
             profile.vf.push(new_override);
@@ -562,6 +602,7 @@ fn ensure_editing_profile(sriov: &mut SriovState) {
             defaults: crate::config::VfDefaults::default(),
             vf: Vec::new(),
             fdb: crate::config::FdbConfig::default(),
+            roce: None,
         });
     }
 }

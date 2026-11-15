@@ -141,12 +141,13 @@ async fn handle_sriov_cli(action: SriovAction) -> Result<()> {
                                 None => "-".to_string(),
                             };
                             println!(
-                                "  VF#{:<3} {:<14} {} trust={:<5} spoofchk={:<5} vlan={:<6} {:<10} {}",
+                                "  VF#{:<3} {:<14} {} trust={:<5} spoofchk={:<5} link={:<7} vlan={:<6} {:<10} {}",
                                 vf.index,
                                 pci,
                                 vf.configured.mac,
                                 vf.configured.trust,
                                 vf.configured.spoofchk,
+                                vf.configured.link_state.as_deref().unwrap_or("-"),
                                 vlan_str,
                                 status,
                                 used
@@ -204,6 +205,24 @@ async fn handle_sriov_cli(action: SriovAction) -> Result<()> {
                     "SpoofChk:     {}",
                     if p.defaults.spoofchk { "on" } else { "off" }
                 );
+                println!(
+                    "Link State:   {}",
+                    p.defaults.link_state.map_or("unmanaged", |s| s.as_str())
+                );
+                match &p.roce {
+                    None => println!("RoCE QoS:     not configured"),
+                    Some(r) if !r.enabled => println!("RoCE QoS:     off"),
+                    Some(r) => println!(
+                        "RoCE QoS:     on (DSCP {}->prio {} PFC, CNP {}->prio {}, storm {} ms, ToS {})",
+                        r.dscp,
+                        r.priority,
+                        r.cnp_dscp,
+                        r.cnp_priority,
+                        r.pfc_storm_timeout_ms,
+                        r.roce_tos()
+                            .map_or_else(|| "invalid".to_string(), |t| t.to_string())
+                    ),
+                }
                 println!("FDB Mode:     {:?}", p.fdb.mode);
 
                 if let Some(iface) = pf_iface {

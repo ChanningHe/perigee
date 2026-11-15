@@ -4,6 +4,7 @@ pub mod detect;
 pub mod fdb;
 pub mod mac_strategy;
 mod pve_conf;
+pub mod roce;
 pub mod ui;
 pub mod vendor;
 pub mod vf;

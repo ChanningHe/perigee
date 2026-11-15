@@ -94,6 +94,7 @@ impl SriovModule {
                 Ok(Ok(result)) => {
                     rt.last_applied = Some(Utc::now());
                     rt.config_dirty = false;
+                    push_warnings(&mut rt.events, &result.warnings);
                     if result.is_success() {
                         rt.state = ProfileState::Active;
                         rt.last_error = None;
@@ -209,6 +210,7 @@ impl SriovModule {
             Ok(result) => {
                 rt.last_applied = Some(Utc::now());
                 rt.config_dirty = false;
+                push_warnings(&mut rt.events, &result.warnings);
                 if result.is_success() {
                     rt.state = ProfileState::Active;
                     rt.last_error = None;
@@ -411,6 +413,12 @@ fn push_event(events: &mut Vec<ProfileEvent>, level: EventLevel, message: String
     }
 }
 
+fn push_warnings(events: &mut Vec<ProfileEvent>, warnings: &[String]) {
+    for w in warnings {
+        push_event(events, EventLevel::Warn, w.clone());
+    }
+}
+
 fn build_vf_status(config: &SriovProfileConfig, pf_iface: Option<&str>) -> Vec<VfRuntimeStatus> {
     let actual_states = pf_iface
         .and_then(|pf| vf::read_actual_vf_states(pf).ok())
@@ -422,12 +430,7 @@ fn build_vf_status(config: &SriovProfileConfig, pf_iface: Option<&str>) -> Vec<V
     let mut vfs = Vec::new();
     for i in 0..config.num_vfs {
         let vf_override = config.vf.iter().find(|o| o.index == i);
-        let trust = vf_override
-            .and_then(|o| o.trust)
-            .unwrap_or(config.defaults.trust);
-        let spoofchk = vf_override
-            .and_then(|o| o.spoofchk)
-            .unwrap_or(config.defaults.spoofchk);
+        let flags = vf::vf_flags(i, config);
         let mac = vf_override
             .and_then(|o| o.mac.as_ref())
             .map(|m| m.to_string())
@@ -443,10 +446,11 @@ fn build_vf_status(config: &SriovProfileConfig, pf_iface: Option<&str>) -> Vec<V
 
         let configured = VfSnapshot {
             mac: mac.clone(),
-            trust,
-            spoofchk,
+            trust: flags.trust,
+            spoofchk: flags.spoofchk,
             vlan_id,
             vlan_qos,
+            link_state: flags.link_state.map(|s| s.to_string()),
         };
 
         let actual_vf = actual_states.iter().find(|a| a.index == i);
@@ -456,6 +460,7 @@ fn build_vf_status(config: &SriovProfileConfig, pf_iface: Option<&str>) -> Vec<V
             spoofchk: a.spoofchk,
             vlan_id: a.vlan_id,
             vlan_qos: None,
+            link_state: a.link_state.map(|s| s.to_string()),
         });
 
         let matches = if let Some(ref act) = actual {
@@ -463,7 +468,12 @@ fn build_vf_status(config: &SriovProfileConfig, pf_iface: Option<&str>) -> Vec<V
             let trust_ok = act.trust == configured.trust;
             let spoof_ok = act.spoofchk == configured.spoofchk;
             let vlan_ok = act.vlan_id == configured.vlan_id;
-            mac_ok && trust_ok && spoof_ok && vlan_ok
+            // Unmanaged link state, or a driver that does not report it,
+            // cannot mismatch.
+            let link_ok = configured.link_state.is_none()
+                || act.link_state.is_none()
+                || act.link_state == configured.link_state;
+            mac_ok && trust_ok && spoof_ok && vlan_ok && link_ok
         } else {
             false
         };

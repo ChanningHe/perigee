@@ -3,7 +3,7 @@ use perigee_core::mac::MacAddress;
 use perigee_core::sysfs;
 use tracing::{info, warn};
 
-use crate::config::{SriovProfileConfig, VfOverride, VlanConfig};
+use crate::config::{SriovProfileConfig, VfLinkState, VfOverride, VlanConfig};
 use crate::mac_strategy::MacStrategy;
 
 /// Apply a complete SR-IOV profile: create VFs and configure each one.
@@ -33,6 +33,7 @@ pub fn apply_profile(profile_name: &str, config: &SriovProfileConfig) -> Result<
         created_vfs: 0,
         configured_vfs: 0,
         errors: Vec::new(),
+        warnings: Vec::new(),
     };
 
     // Step 1: Ensure PF is up
@@ -40,8 +41,20 @@ pub fn apply_profile(profile_name: &str, config: &SriovProfileConfig) -> Result<
         warn!(pf = %pf_iface, error = %e, "failed to bring PF up");
     }
 
-    // Step 2: Create/reset VFs only if count differs
-    let current = sysfs::read_sriov_numvfs(&pf_iface).unwrap_or(0);
+    let numvfs = sysfs::read_sriov_numvfs(&pf_iface).ok();
+    let current = numvfs.unwrap_or(0);
+
+    // Step 2: Opt-in PF RoCE/lossless QoS, before any VF is (re)created. The
+    // PFC change toggles the PF link once, so it is only made while no VFs
+    // exist (boot); with VFs present (or an unreadable count) it is deferred.
+    // Only what differs is written. Failures never block VF creation.
+    if let Some(roce) = config.enabled_roce() {
+        let outcome = crate::roce::apply_pf_qos(&pf_iface, roce, numvfs);
+        result.errors.extend(outcome.errors);
+        result.warnings.extend(outcome.warnings);
+    }
+
+    // Step 3: Create/reset VFs only if count differs
     if current == config.num_vfs {
         info!(pf = %pf_iface, vfs = current, "VF count already matches, skipping reset");
     } else {
@@ -75,13 +88,31 @@ pub fn apply_profile(profile_name: &str, config: &SriovProfileConfig) -> Result<
     let strategy = MacStrategy::from_config(&config.mac_strategy, &config.mac);
     let macs = strategy.generate(actual);
 
+    // Current link states, so `state` is only written where it differs. A
+    // failed read leaves every VF "unknown" (see needs_link_state_write).
+    let live_states = read_actual_vf_states(&pf_iface).unwrap_or_else(|e| {
+        warn!(pf = %pf_iface, error = %e, "cannot read VF link states");
+        Vec::new()
+    });
+
     // Step 5: Configure each VF
     for vf_index in 0..actual {
         let vf_mac = get_vf_mac(vf_index, &macs, &config.vf);
-        let (trust, spoofchk) = get_vf_flags(vf_index, config);
+        let flags = vf_flags(vf_index, config);
         let vlan = get_vf_vlan(vf_index, config);
+        let live_link_state = live_states
+            .iter()
+            .find(|s| s.index == vf_index)
+            .and_then(|s| s.link_state);
 
-        match configure_single_vf(&pf_iface, vf_index, &vf_mac, trust, spoofchk, vlan.as_ref()) {
+        match configure_single_vf(
+            &pf_iface,
+            vf_index,
+            &vf_mac,
+            flags,
+            vlan.as_ref(),
+            live_link_state,
+        ) {
             Ok(()) => result.configured_vfs += 1,
             Err(e) => result
                 .errors
@@ -107,6 +138,8 @@ pub struct ApplyResult {
     pub created_vfs: u32,
     pub configured_vfs: u32,
     pub errors: Vec<String>,
+    /// Notable but non-failing conditions (e.g. a PF link flap on a live host).
+    pub warnings: Vec<String>,
 }
 
 impl ApplyResult {
@@ -131,18 +164,31 @@ fn get_vf_mac(index: u32, generated: &[MacAddress], overrides: &[VfOverride]) ->
         .unwrap_or(MacAddress::ZERO)
 }
 
-fn get_vf_flags(index: u32, config: &SriovProfileConfig) -> (bool, bool) {
-    let mut trust = config.defaults.trust;
-    let mut spoofchk = config.defaults.spoofchk;
-    if let Some(ov) = config.vf.iter().find(|o| o.index == index) {
-        if let Some(t) = ov.trust {
-            trust = t;
-        }
-        if let Some(s) = ov.spoofchk {
-            spoofchk = s;
-        }
+/// Effective per-VF flags: profile defaults with the VF override applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VfFlags {
+    pub trust: bool,
+    pub spoofchk: bool,
+    /// `None`: link state is not managed for this VF.
+    pub link_state: Option<VfLinkState>,
+}
+
+pub fn vf_flags(index: u32, config: &SriovProfileConfig) -> VfFlags {
+    let ov = config.vf.iter().find(|o| o.index == index);
+    VfFlags {
+        trust: ov.and_then(|o| o.trust).unwrap_or(config.defaults.trust),
+        spoofchk: ov
+            .and_then(|o| o.spoofchk)
+            .unwrap_or(config.defaults.spoofchk),
+        link_state: ov.and_then(|o| o.link_state).or(config.defaults.link_state),
     }
-    (trust, spoofchk)
+}
+
+/// Whether `ip link set <pf> vf <n> state` must be issued: only for a managed
+/// (explicitly configured) state that differs from, or cannot be compared
+/// with, the live one. Unmanaged VFs are never touched.
+fn needs_link_state_write(desired: Option<VfLinkState>, actual: Option<VfLinkState>) -> bool {
+    desired.is_some_and(|d| actual != Some(d))
 }
 
 fn get_vf_vlan(index: u32, config: &SriovProfileConfig) -> Option<VlanConfig> {
@@ -154,40 +200,59 @@ fn get_vf_vlan(index: u32, config: &SriovProfileConfig) -> Option<VlanConfig> {
     config.defaults.vlan.clone()
 }
 
-fn configure_single_vf(
+/// `ip link` argument lists that configure one VF, in order. VLAN is always
+/// set (0 clears a stale tag); link state comes last so a failure there can
+/// never leave a freshly created VF without its VLAN.
+fn vf_ip_link_commands(
     pf: &str,
     index: u32,
     mac: &MacAddress,
-    trust: bool,
-    spoofchk: bool,
+    flags: VfFlags,
     vlan: Option<&VlanConfig>,
-) -> Result<()> {
-    // Set MAC
-    run_ip_link(&["set", pf, "vf", &index.to_string(), "mac", &mac.to_string()])?;
-
-    // Set trust
-    let trust_val = if trust { "on" } else { "off" };
-    run_ip_link(&["set", pf, "vf", &index.to_string(), "trust", trust_val])?;
-
-    // Set spoofchk
-    let spoof_val = if spoofchk { "on" } else { "off" };
-    run_ip_link(&["set", pf, "vf", &index.to_string(), "spoofchk", spoof_val])?;
-
-    // Always set VLAN: explicit id or 0 to clear stale VLAN
-    {
-        let vlan_id = vlan.map(|v| v.id).unwrap_or(0);
-        let mut args = vec![
+    actual_link_state: Option<VfLinkState>,
+) -> Vec<Vec<String>> {
+    let vf = |verb: &str, value: String| {
+        vec![
             "set".to_string(),
             pf.to_string(),
             "vf".to_string(),
             index.to_string(),
-            "vlan".to_string(),
-            vlan_id.to_string(),
-        ];
-        if let Some(qos) = vlan.and_then(|v| v.qos) {
-            args.push("qos".to_string());
-            args.push(qos.to_string());
-        }
+            verb.to_string(),
+            value,
+        ]
+    };
+    let on_off = |b: bool| if b { "on" } else { "off" }.to_string();
+
+    let mut vlan_cmd = vf("vlan", vlan.map(|v| v.id).unwrap_or(0).to_string());
+    if let Some(qos) = vlan.and_then(|v| v.qos) {
+        vlan_cmd.push("qos".to_string());
+        vlan_cmd.push(qos.to_string());
+    }
+
+    let mut cmds = vec![
+        vf("mac", mac.to_string()),
+        vf("trust", on_off(flags.trust)),
+        vf("spoofchk", on_off(flags.spoofchk)),
+        vlan_cmd,
+    ];
+    if let Some(state) = flags
+        .link_state
+        .filter(|_| needs_link_state_write(flags.link_state, actual_link_state))
+    {
+        cmds.push(vf("state", state.as_str().to_string()));
+    }
+    cmds
+}
+
+fn configure_single_vf(
+    pf: &str,
+    index: u32,
+    mac: &MacAddress,
+    flags: VfFlags,
+    vlan: Option<&VlanConfig>,
+    actual_link_state: Option<VfLinkState>,
+) -> Result<()> {
+    for args in vf_ip_link_commands(pf, index, mac, flags, vlan, actual_link_state) {
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         run_ip_link(&args_ref)?;
     }
@@ -201,7 +266,17 @@ fn configure_single_vf(
             }
         })
         .unwrap_or_else(|| "-".into());
-    info!(pf = %pf, vf = index, mac = %mac, trust, spoofchk, vlan = %vlan_str, "VF configured");
+    let link_str = flags.link_state.map_or("unmanaged", |s| s.as_str());
+    info!(
+        pf = %pf,
+        vf = index,
+        mac = %mac,
+        trust = flags.trust,
+        spoofchk = flags.spoofchk,
+        link_state = link_str,
+        vlan = %vlan_str,
+        "VF configured"
+    );
     Ok(())
 }
 
@@ -213,6 +288,8 @@ pub struct VfActualState {
     pub trust: bool,
     pub spoofchk: bool,
     pub vlan_id: Option<u16>,
+    /// `None` when the driver does not report a link state.
+    pub link_state: Option<VfLinkState>,
 }
 
 /// Read actual VF states from `ip -d link show <pf>`.
@@ -273,12 +350,18 @@ fn parse_vf_lines(output: &str) -> Vec<VfActualState> {
             None
         };
 
+        let link_state = rest
+            .split(", ")
+            .find_map(|field| field.strip_prefix("link-state "))
+            .and_then(|v| v.trim().parse().ok());
+
         results.push(VfActualState {
             index,
             mac,
             trust,
             spoofchk,
             vlan_id,
+            link_state,
         });
     }
     results
@@ -300,4 +383,155 @@ fn run_ip_link(args: &[&str]) -> Result<()> {
         bail!("ip link {} failed: {}", args.join(" "), stderr.trim());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{SriovFileConfig, VfLinkState};
+
+    /// Captured from `ip -d link show enp65s0np0` on serverhub (PVE 9.2,
+    /// iproute2-6.15.0, ConnectX-5 mlx5_core, legacy eswitch).
+    const IP_D_LINK_SERVERHUB: &str = "\
+4: enp65s0np0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq master vmbr0 state UP mode DEFAULT group default qlen 1000
+    link/ether 8c:2a:8e:88:9a:f6 brd ff:ff:ff:ff:ff:ff promiscuity 3 allmulti 3 minmtu 68 maxmtu 9978
+    vf 0     link/ether 8c:2a:8e:88:9a:f7 brd ff:ff:ff:ff:ff:ff, spoof checking off, link-state auto, trust on, query_rss off
+    vf 7     link/ether 8c:2a:8e:88:9a:fe brd ff:ff:ff:ff:ff:ff, vlan 4020, spoof checking off, link-state auto, trust on, query_rss off
+    vf 20     link/ether 8c:2a:8e:88:9b:0b brd ff:ff:ff:ff:ff:ff, vlan 200, spoof checking off, link-state auto, trust off, query_rss off
+";
+
+    #[test]
+    fn parses_real_serverhub_vf_lines() {
+        let vfs = parse_vf_lines(IP_D_LINK_SERVERHUB);
+        assert_eq!(vfs.len(), 3);
+        assert_eq!(vfs[0].index, 0);
+        assert_eq!(vfs[0].mac, "8c:2a:8e:88:9a:f7");
+        assert!(vfs[0].trust);
+        assert!(!vfs[0].spoofchk);
+        assert_eq!(vfs[0].vlan_id, None);
+        assert_eq!(vfs[0].link_state, Some(VfLinkState::Auto));
+        assert_eq!(vfs[1].vlan_id, Some(4020));
+        assert_eq!(vfs[2].index, 20);
+        assert!(!vfs[2].trust);
+        assert_eq!(vfs[2].vlan_id, Some(200));
+    }
+
+    #[test]
+    fn parses_enable_and_disable_link_state() {
+        let out = "    vf 1     link/ether 8c:2a:8e:88:9a:f8 brd ff:ff:ff:ff:ff:ff, spoof checking off, link-state enable, trust on, query_rss off\n    vf 2     link/ether 8c:2a:8e:88:9a:f9 brd ff:ff:ff:ff:ff:ff, spoof checking on, link-state disable, trust off, query_rss off\n";
+        let vfs = parse_vf_lines(out);
+        assert_eq!(vfs[0].link_state, Some(VfLinkState::Enable));
+        assert_eq!(vfs[1].link_state, Some(VfLinkState::Disable));
+        assert!(vfs[1].spoofchk);
+    }
+
+    #[test]
+    fn missing_link_state_reads_as_unknown() {
+        // Drivers without IFLA_VF_LINK_STATE print no link-state field.
+        let out = "    vf 0     link/ether 8c:2a:8e:88:9a:f7 brd ff:ff:ff:ff:ff:ff, spoof checking off, trust on\n";
+        assert_eq!(parse_vf_lines(out)[0].link_state, None);
+    }
+
+    #[test]
+    fn link_state_written_only_when_managed_and_different() {
+        use VfLinkState::*;
+        // Unmanaged (no link_state anywhere): never written, whatever the VF has.
+        assert!(!needs_link_state_write(None, Some(Enable)));
+        assert!(!needs_link_state_write(None, None));
+        // Managed: written on mismatch only.
+        assert!(!needs_link_state_write(Some(Auto), Some(Auto)));
+        assert!(!needs_link_state_write(Some(Enable), Some(Enable)));
+        assert!(needs_link_state_write(Some(Enable), Some(Auto)));
+        assert!(needs_link_state_write(Some(Auto), Some(Enable)));
+        // Managed but unreadable: an explicit request is issued.
+        assert!(needs_link_state_write(Some(Auto), None));
+    }
+
+    fn mac() -> MacAddress {
+        "8c:2a:8e:88:9a:fe".parse().unwrap()
+    }
+
+    fn flags(link_state: Option<VfLinkState>) -> VfFlags {
+        VfFlags {
+            trust: true,
+            spoofchk: false,
+            link_state,
+        }
+    }
+
+    #[test]
+    fn vf_commands_set_state_last_after_vlan() {
+        let vlan = VlanConfig {
+            id: 4020,
+            qos: None,
+            proto: None,
+        };
+        let cmds = vf_ip_link_commands(
+            "enp65s0np0",
+            7,
+            &mac(),
+            flags(Some(VfLinkState::Enable)),
+            Some(&vlan),
+            Some(VfLinkState::Auto),
+        );
+        let verbs: Vec<&str> = cmds.iter().map(|c| c[4].as_str()).collect();
+        assert_eq!(verbs, ["mac", "trust", "spoofchk", "vlan", "state"]);
+        assert_eq!(
+            cmds.last().unwrap(),
+            &["set", "enp65s0np0", "vf", "7", "state", "enable"].map(String::from)
+        );
+        assert_eq!(
+            cmds[3],
+            ["set", "enp65s0np0", "vf", "7", "vlan", "4020"].map(String::from)
+        );
+    }
+
+    #[test]
+    fn vf_commands_omit_state_when_unmanaged_or_matching() {
+        for (desired, live) in [
+            (None, Some(VfLinkState::Enable)),
+            (Some(VfLinkState::Enable), Some(VfLinkState::Enable)),
+        ] {
+            let cmds = vf_ip_link_commands("p", 0, &mac(), flags(desired), None, live);
+            assert!(cmds.iter().all(|c| c[4] != "state"));
+            // VLAN is always (re)set, 0 clears a stale tag.
+            assert_eq!(
+                cmds.last().unwrap(),
+                &["set", "p", "vf", "0", "vlan", "0"].map(String::from)
+            );
+        }
+    }
+
+    #[test]
+    fn vf_flags_apply_override_over_defaults() {
+        let config: SriovFileConfig = toml::from_str(
+            r#"
+[sriov.p]
+mac = "8c:2a:8e:88:9a:f6"
+num_vfs = 4
+[sriov.p.defaults]
+link_state = "enable"
+[[sriov.p.vf]]
+index = 2
+trust = false
+link_state = "auto"
+"#,
+        )
+        .unwrap();
+        let p = &config.sriov["p"];
+        let f0 = vf_flags(0, p);
+        assert!(f0.trust);
+        assert_eq!(f0.link_state, Some(VfLinkState::Enable));
+        let f2 = vf_flags(2, p);
+        assert!(!f2.trust);
+        assert!(!f2.spoofchk);
+        assert_eq!(f2.link_state, Some(VfLinkState::Auto));
+    }
+
+    #[test]
+    fn vf_flags_without_link_state_are_unmanaged() {
+        let config: SriovFileConfig =
+            toml::from_str("[sriov.p]\nmac = \"8c:2a:8e:88:9a:f6\"\nnum_vfs = 2\n").unwrap();
+        assert_eq!(vf_flags(0, &config.sriov["p"]).link_state, None);
+    }
 }

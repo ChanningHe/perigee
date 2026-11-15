@@ -100,6 +100,17 @@ fn render_summary(frame: &mut Frame, sriov: &SriovState, area: Rect) {
         ]));
         lines.push(Line::from(vec![
             Span::styled("    ", Style::default()),
+            Span::styled("Link State: ", common::style_label()),
+            Span::styled(
+                profile
+                    .defaults
+                    .link_state
+                    .map_or("unmanaged", |s| s.as_str()),
+                common::style_value(),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("    ", Style::default()),
             Span::styled("Overrides:  ", common::style_label()),
             Span::styled(format!("{} VFs", profile.vf.len()), common::style_value()),
         ]));
@@ -108,6 +119,17 @@ fn render_summary(frame: &mut Frame, sriov: &SriovState, area: Rect) {
             Span::styled("FDB:        ", common::style_label()),
             Span::styled(format!("{:?}", profile.fdb.mode), common::style_value()),
         ]));
+        lines.push(Line::from(vec![
+            Span::styled("    ", Style::default()),
+            Span::styled("RoCE QoS:   ", common::style_label()),
+            Span::styled(roce_summary(profile.roce.as_ref()), common::style_value()),
+        ]));
+        if profile.roce_enabled() {
+            lines.push(Line::from(Span::styled(
+                "    ⚠ PFC changes flap the PF link: with VFs present they wait for next boot",
+                common::style_warn(),
+            )));
+        }
 
         lines.push(Line::from(""));
 
@@ -157,6 +179,24 @@ fn render_summary(frame: &mut Frame, sriov: &SriovState, area: Rect) {
             .border_style(Style::default().fg(common::BORDER)),
     );
     frame.render_widget(para, area);
+}
+
+/// One-line view of the RoCE section; edited only in sriov.toml.
+fn roce_summary(roce: Option<&crate::config::RoceConfig>) -> String {
+    match roce {
+        None => "not configured".to_string(),
+        Some(r) if !r.enabled => "off".to_string(),
+        Some(r) => format!(
+            "on — DSCP {}→prio {} (PFC), CNP {}→prio {}, storm {} ms, ToS {}",
+            r.dscp,
+            r.priority,
+            r.cnp_dscp,
+            r.cnp_priority,
+            r.pfc_storm_timeout_ms,
+            r.roce_tos()
+                .map_or_else(|| "invalid".to_string(), |t| t.to_string())
+        ),
+    }
 }
 
 fn render_toml_preview(frame: &mut Frame, sriov: &mut SriovState, area: Rect) {
