@@ -1,5 +1,6 @@
 use crate::config::{sriov_config_path, FdbMode, SriovFileConfig, SriovProfileConfig};
 use crate::fdb::{FdbService, FdbStatus, FdbTarget};
+use crate::roce::retry::{TosEnv, TosRetry};
 use crate::vf;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -14,6 +15,9 @@ use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
 use perigee_daemon::module::{BootPhase, Module};
+
+/// Events kept per profile.
+const MAX_EVENTS: usize = 200;
 
 #[derive(Debug, Clone)]
 struct ProfileRuntime {
@@ -30,6 +34,8 @@ struct ProfileRuntime {
 pub struct SriovModule {
     profiles: BTreeMap<String, ProfileRuntime>,
     fdb: FdbService,
+    /// Background retries of RoCE ToS writes an apply left pending.
+    tos_retry: TosRetry,
     /// sriov.toml loaded successfully at least once (gates FDB reconciling).
     config_loaded: bool,
     shutdown_tx: Option<broadcast::Sender<()>>,
@@ -43,11 +49,39 @@ impl Default for SriovModule {
 
 impl SriovModule {
     pub fn new() -> Self {
+        Self::with_tos_env(TosEnv::system())
+    }
+
+    fn with_tos_env(env: TosEnv) -> Self {
         Self {
             profiles: BTreeMap::new(),
             fdb: FdbService::new(),
+            tos_retry: TosRetry::new(env),
             config_loaded: false,
             shutdown_tx: None,
+        }
+    }
+
+    /// A failed background ToS retry degrades an otherwise healthy profile.
+    fn effective_state(&self, rt: &ProfileRuntime) -> ProfileState {
+        if rt.state == ProfileState::Active && self.tos_retry.failed(&rt.name) {
+            ProfileState::Degraded
+        } else {
+            rt.state
+        }
+    }
+
+    /// Stop ToS retries a reload made stale: profile removed, or its PF or
+    /// enabled `[roce]` section changed, so a disabled section is never
+    /// written late. Other retries keep running.
+    fn cancel_stale_tos_retries(&mut self, new: &BTreeMap<String, SriovProfileConfig>) {
+        for (name, rt) in &mut self.profiles {
+            let stale = new.get(name).is_none_or(|cfg| {
+                cfg.mac != rt.config.mac || cfg.enabled_roce() != rt.config.enabled_roce()
+            });
+            if stale {
+                push_events(&mut rt.events, self.tos_retry.cancel(name));
+            }
         }
     }
 
@@ -85,6 +119,7 @@ impl SriovModule {
         for (name, rt) in &mut self.profiles {
             let profile_name = name.clone();
             let config = rt.config.clone();
+            push_events(&mut rt.events, self.tos_retry.cancel(name));
 
             let apply_result =
                 tokio::task::spawn_blocking(move || vf::apply_profile(&profile_name, &config))
@@ -92,57 +127,10 @@ impl SriovModule {
 
             match apply_result {
                 Ok(Ok(result)) => {
-                    rt.last_applied = Some(Utc::now());
-                    rt.config_dirty = false;
-                    push_warnings(&mut rt.events, &result.warnings);
-                    if result.is_success() {
-                        rt.state = ProfileState::Active;
-                        rt.last_error = None;
-                        push_event(
-                            &mut rt.events,
-                            EventLevel::Info,
-                            format!(
-                                "Applied: {} VFs created and configured",
-                                result.configured_vfs
-                            ),
-                        );
-                    } else if result.is_degraded() {
-                        rt.state = ProfileState::Degraded;
-                        rt.error_count += result.errors.len() as u32;
-                        let msg = result.errors.join("; ");
-                        rt.last_error = Some(msg.clone());
-                        push_event(
-                            &mut rt.events,
-                            EventLevel::Warn,
-                            format!(
-                                "Degraded: {}/{} VFs OK — {}",
-                                result.configured_vfs, result.total_vfs, msg
-                            ),
-                        );
-                    } else {
-                        rt.state = ProfileState::Error;
-                        rt.error_count += result.errors.len() as u32;
-                        let msg = result.errors.join("; ");
-                        rt.last_error = Some(msg.clone());
-                        push_event(
-                            &mut rt.events,
-                            EventLevel::Error,
-                            format!("Failed: {}", msg),
-                        );
-                    }
+                    self.tos_retry.start(name, result.pending_tos.as_ref());
+                    record_result(rt, &result);
                 }
-                Ok(Err(e)) => {
-                    let msg = e.to_string();
-                    if is_nic_offline(&e) {
-                        rt.state = ProfileState::NicOffline;
-                        warn!(profile = %name, "PF not found — NIC offline?");
-                    } else {
-                        rt.state = ProfileState::Error;
-                        rt.error_count += 1;
-                    }
-                    rt.last_error = Some(msg.clone());
-                    push_event(&mut rt.events, EventLevel::Error, msg);
-                }
+                Ok(Err(e)) => record_error(rt, &e),
                 Err(e) => {
                     let msg = format!("apply task panicked: {}", e);
                     rt.state = ProfileState::Error;
@@ -163,7 +151,7 @@ impl SriovModule {
 
         Some(ProfileDetailStatus {
             name: rt.name.clone(),
-            state: rt.state,
+            state: self.effective_state(rt),
             pf_iface,
             pf_mac: rt.config.mac.to_string(),
             last_applied: rt.last_applied,
@@ -189,57 +177,41 @@ impl SriovModule {
     }
 
     pub fn get_profile_events(&self, profile_name: &str, limit: usize) -> Vec<ProfileEvent> {
-        self.profiles
-            .get(profile_name)
-            .map(|rt| {
-                let len = rt.events.len();
-                let start = len.saturating_sub(limit);
-                rt.events[start..].to_vec()
-            })
-            .unwrap_or_default()
+        let Some(rt) = self.profiles.get(profile_name) else {
+            return Vec::new();
+        };
+        let mut events = rt.events.clone();
+        events.extend(self.tos_retry.outcome(profile_name));
+        events.sort_by_key(|e| e.timestamp);
+        let start = events.len().saturating_sub(limit.min(MAX_EVENTS));
+        events.split_off(start)
     }
 
     pub fn retry_profile(&mut self, profile_name: &str) -> Result<()> {
+        self.retry_profile_with(profile_name, vf::apply_profile)
+    }
+
+    fn retry_profile_with(
+        &mut self,
+        profile_name: &str,
+        apply: impl FnOnce(&str, &SriovProfileConfig) -> Result<vf::ApplyResult>,
+    ) -> Result<()> {
         let rt = self
             .profiles
             .get_mut(profile_name)
             .context(format!("profile '{}' not found", profile_name))?;
 
         info!(profile = %profile_name, "retrying profile apply");
-        match vf::apply_profile(profile_name, &rt.config) {
+        push_events(&mut rt.events, self.tos_retry.cancel(profile_name));
+        match apply(profile_name, &rt.config) {
             Ok(result) => {
-                rt.last_applied = Some(Utc::now());
-                rt.config_dirty = false;
-                push_warnings(&mut rt.events, &result.warnings);
-                if result.is_success() {
-                    rt.state = ProfileState::Active;
-                    rt.last_error = None;
-                    push_event(&mut rt.events, EventLevel::Info, "Retry succeeded".into());
-                } else {
-                    let msg = result.errors.join("; ");
-                    rt.last_error = Some(msg.clone());
-                    push_event(
-                        &mut rt.events,
-                        EventLevel::Warn,
-                        format!("Retry partial: {}", msg),
-                    );
-                }
+                self.tos_retry
+                    .start(profile_name, result.pending_tos.as_ref());
+                record_result(rt, &result);
                 Ok(())
             }
             Err(e) => {
-                let msg = e.to_string();
-                if is_nic_offline(&e) {
-                    rt.state = ProfileState::NicOffline;
-                } else {
-                    rt.state = ProfileState::Error;
-                    rt.error_count += 1;
-                }
-                rt.last_error = Some(msg.clone());
-                push_event(
-                    &mut rt.events,
-                    EventLevel::Error,
-                    format!("Retry failed: {}", msg),
-                );
+                record_error(rt, &e);
                 Err(e)
             }
         }
@@ -311,6 +283,7 @@ impl Module for SriovModule {
         // Fail instead of loading an empty set: dropping every profile would
         // make the FDB reconciler release all entries over a config typo.
         let new_profiles = Self::read_profiles()?;
+        self.cancel_stale_tos_retries(&new_profiles);
 
         self.profiles
             .retain(|name, _| new_profiles.contains_key(name));
@@ -348,6 +321,7 @@ impl Module for SriovModule {
 
     async fn shutdown(&self) -> Result<()> {
         info!("SR-IOV module shutting down");
+        self.tos_retry.cancel_all();
         // Stop the FDB reconciler. Installed entries stay so guests keep
         // connectivity across a daemon restart.
         if let Some(tx) = &self.shutdown_tx {
@@ -378,7 +352,7 @@ impl Module for SriovModule {
             .values()
             .map(|rt| ProfileSummary {
                 name: rt.name.clone(),
-                state: rt.state,
+                state: self.effective_state(rt),
                 error_count: rt.error_count,
             })
             .collect();
@@ -401,13 +375,64 @@ impl Module for SriovModule {
     }
 }
 
+/// Record an apply result: state, error count, last error and events.
+fn record_result(rt: &mut ProfileRuntime, result: &vf::ApplyResult) {
+    rt.last_applied = Some(Utc::now());
+    rt.config_dirty = false;
+    push_warnings(&mut rt.events, &result.warnings);
+    let msg = result.errors.join("; ");
+    let (state, level, text) = if result.is_success() {
+        let text = format!(
+            "Applied: {} VFs created and configured",
+            result.configured_vfs
+        );
+        (ProfileState::Active, EventLevel::Info, text)
+    } else if result.is_degraded() {
+        let text = format!(
+            "Degraded: {}/{} VFs OK — {}",
+            result.configured_vfs, result.total_vfs, msg
+        );
+        (ProfileState::Degraded, EventLevel::Warn, text)
+    } else {
+        let text = format!("Failed: {}", msg);
+        (ProfileState::Error, EventLevel::Error, text)
+    };
+    rt.state = state;
+    if state == ProfileState::Active {
+        rt.last_error = None;
+    } else {
+        rt.error_count += result.errors.len() as u32;
+        rt.last_error = Some(msg);
+    }
+    push_event(&mut rt.events, level, text);
+}
+
+/// Record an apply that failed before any result.
+fn record_error(rt: &mut ProfileRuntime, e: &anyhow::Error) {
+    let msg = e.to_string();
+    if is_nic_offline(e) {
+        rt.state = ProfileState::NicOffline;
+        warn!(profile = %rt.name, "PF not found — NIC offline?");
+    } else {
+        rt.state = ProfileState::Error;
+        rt.error_count += 1;
+    }
+    rt.last_error = Some(msg.clone());
+    push_event(&mut rt.events, EventLevel::Error, msg);
+}
+
 fn push_event(events: &mut Vec<ProfileEvent>, level: EventLevel, message: String) {
-    const MAX_EVENTS: usize = 200;
-    events.push(ProfileEvent {
+    let event = ProfileEvent {
         timestamp: Utc::now(),
         level,
         message,
-    });
+    };
+    push_events(events, Some(event));
+}
+
+/// Append keeping the newest `MAX_EVENTS`.
+fn push_events(events: &mut Vec<ProfileEvent>, new: impl IntoIterator<Item = ProfileEvent>) {
+    events.extend(new);
     if events.len() > MAX_EVENTS {
         events.drain(..events.len() - MAX_EVENTS);
     }
@@ -516,6 +541,159 @@ fn fdb_runtime_status(mode: &FdbMode, status: Option<FdbStatus>) -> FdbRuntimeSt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::roce::retry::tests::{fake_env, wait_for};
+    use crate::roce::tos::test_env::{FakeSys, PF};
+    use crate::roce::tos::PendingTos;
+    use std::time::Duration;
+
+    const SETTLE: Duration = Duration::from_millis(100);
+
+    fn profile_config(roce_enabled: bool) -> SriovProfileConfig {
+        let text = format!(
+            "[sriov.p]\nmac = \"8c:2a:8e:88:9a:f6\"\nnum_vfs = 2\n\
+             [sriov.p.roce]\nenabled = {roce_enabled}\n"
+        );
+        toml::from_str::<SriovFileConfig>(&text).unwrap().sriov["p"].clone()
+    }
+
+    fn pending() -> PendingTos {
+        PendingTos {
+            pf: PF.into(),
+            tos: 106,
+        }
+    }
+
+    /// One Active profile "p" whose ToS retry runs against `sys`.
+    fn module(sys: &FakeSys) -> SriovModule {
+        let mut m = SriovModule::with_tos_env(fake_env(sys, Duration::from_secs(3)));
+        let rt = ProfileRuntime {
+            name: "p".into(),
+            config: profile_config(true),
+            state: ProfileState::Active,
+            error_count: 0,
+            last_applied: None,
+            last_error: None,
+            events: Vec::new(),
+            config_dirty: false,
+        };
+        m.profiles.insert("p".into(), rt);
+        m
+    }
+
+    fn result(
+        configured: u32,
+        errors: &[&str],
+        pending_tos: Option<PendingTos>,
+    ) -> vf::ApplyResult {
+        vf::ApplyResult {
+            pf_iface: PF.into(),
+            total_vfs: 2,
+            created_vfs: 2,
+            configured_vfs: configured,
+            errors: errors.iter().map(|e| e.to_string()).collect(),
+            warnings: Vec::new(),
+            pending_tos,
+        }
+    }
+
+    fn state(m: &SriovModule) -> ProfileState {
+        m.status().profiles[0].state
+    }
+
+    #[tokio::test]
+    async fn reload_disabling_roce_cancels_the_tos_retry() {
+        let sys = FakeSys::new();
+        sys.add_configfs_group("0");
+        let mut m = module(&sys);
+        m.tos_retry.start("p", Some(&pending()));
+        let new = BTreeMap::from([("p".to_string(), profile_config(false))]);
+        m.cancel_stale_tos_retries(&new);
+        sys.add_rdma_device();
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(sys.read_tos(), "0", "disabled section never written late");
+    }
+
+    #[tokio::test]
+    async fn reload_with_unchanged_roce_keeps_the_tos_retry_live() {
+        let sys = FakeSys::new();
+        sys.add_configfs_group("0");
+        let mut m = module(&sys);
+        m.tos_retry.start("p", Some(&pending()));
+        let new = BTreeMap::from([("p".to_string(), profile_config(true))]);
+        m.cancel_stale_tos_retries(&new);
+        sys.add_rdma_device();
+        assert!(wait_for(|| m.tos_retry.outcome("p").is_some()).await);
+        assert_eq!(sys.read_tos(), "106", "the original task still wrote");
+        m.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_tos_retry_shows_the_profile_degraded() {
+        let sys = FakeSys::new();
+        sys.add_rdma_device();
+        sys.add_configfs_group("garbage");
+        let m = module(&sys);
+        m.tos_retry.start("p", Some(&pending()));
+        assert!(wait_for(|| m.tos_retry.failed("p")).await);
+        assert_eq!(state(&m), ProfileState::Degraded);
+        let events = m.get_profile_events("p", 10);
+        assert_eq!(events.last().unwrap().level, EventLevel::Error);
+    }
+
+    #[tokio::test]
+    async fn retry_with_partial_result_is_degraded_even_after_cancelling_the_tos_retry() {
+        let sys = FakeSys::new();
+        sys.add_rdma_device();
+        sys.add_configfs_group("garbage");
+        let mut m = module(&sys);
+        m.tos_retry.start("p", Some(&pending()));
+        assert!(wait_for(|| m.tos_retry.failed("p")).await);
+
+        let tos_err = "roce: RoCE default ToS not applied: bad value";
+        m.retry_profile_with("p", |_, _| Ok(result(2, &[tos_err], None)))
+            .unwrap();
+        assert_eq!(state(&m), ProfileState::Degraded);
+        let rt = &m.profiles["p"];
+        assert_eq!(rt.last_error.as_deref(), Some(tos_err));
+        assert!(
+            rt.events
+                .iter()
+                .any(|e| e.message.contains("not applied on")),
+            "the old retry's outcome moved into the profile events"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_retry_with_pending_tos_starts_a_new_retry() {
+        let sys = FakeSys::new();
+        sys.add_configfs_group("0");
+        let mut m = module(&sys);
+        m.profiles.get_mut("p").unwrap().state = ProfileState::Error;
+        m.retry_profile_with("p", |_, _| Ok(result(2, &[], Some(pending()))))
+            .unwrap();
+        assert_eq!(state(&m), ProfileState::Active);
+        sys.add_rdma_device();
+        assert!(wait_for(|| m.tos_retry.outcome("p").is_some()).await);
+        assert_eq!(sys.read_tos(), "106");
+        m.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn apply_results_map_to_states() {
+        let sys = FakeSys::new();
+        let mut m = module(&sys);
+        let rt = m.profiles.get_mut("p").unwrap();
+        record_result(rt, &result(0, &["boom"], None));
+        assert_eq!(rt.state, ProfileState::Error);
+        record_result(rt, &result(1, &["VF#1 config failed"], None));
+        assert_eq!(rt.state, ProfileState::Degraded);
+        record_result(rt, &result(2, &[], None));
+        assert_eq!(
+            (rt.state, rt.last_error.as_deref()),
+            (ProfileState::Active, None)
+        );
+        assert_eq!(rt.error_count, 2);
+    }
 
     #[test]
     fn nic_offline_detected_through_context_layer() {

@@ -203,13 +203,33 @@ Behaviour:
   pause setting; if that also fails, the error says the port currently has
   no flow control.
 - **Failures never block VFs**: an invalid `roce` section, a missing
-  `dcb`/`ethtool`, a non-mlx5 PF, no RDMA device or no rdma_cm configfs is
-  reported and the profile is marked degraded; VFs are still created and
-  configured.
-- **Boot timing limitation**: at boot the RDMA device (`/sys/class/net/<pf>/
-  device/infiniband/`) may not exist yet when perigee runs. The ToS step then
-  fails (degraded, with the underlying error) and is **not retried
-  automatically**; re-apply the profile later (TUI "Save & Apply").
+  `dcb`/`ethtool`, a non-mlx5 PF or a rejected write is reported and the
+  profile is marked degraded; VFs are still created and configured.
+- **Command timeout**: every `dcb`, `ethtool`, `modprobe` and `ip` command in
+  the apply path is killed after 10 s and reported as timed out (for a write,
+  the error says the setting is now in an unknown state). After the first
+  timeout the RoCE step issues no further commands, except restoring global
+  pause once if the hung command was the PFC write; VFs are still created.
+  In the per-VF `ip link set` loop the first timeout stops the remaining VFs
+  (reported as an error). A hung tool therefore adds at most about 30 s per
+  profile to boot instead of blocking READY until systemd's 120 s start
+  timeout. Profiles are applied one after another, so this adds up per PF:
+  four PFs that all hang reach `TimeoutStartSec=120`. Only external commands
+  are covered: sysfs/configfs writes (`sriov_numvfs`, the rdma_cm configfs
+  mkdir/write) have no timeout. A process stuck in the kernel that ignores
+  SIGKILL is left behind.
+- **ToS when the RDMA device appears late**: at boot the RDMA device
+  (`/sys/class/net/<pf>/device/infiniband/`) or the rdma_cm configfs tree may
+  not exist yet. That is not an error and does not delay boot: the profile
+  gets a "RoCE ToS pending" warning and the daemon retries in the background
+  every 5 s for up to 10 minutes from that apply, writing only if the value
+  differs. On success it logs an info event (RDMA connections opened before
+  then keep their old ToS until they reconnect); on timeout, a rejected write
+  or a hung `modprobe rdma_cm` (not repeated) it logs an error and the
+  profile shows as degraded. Re-applying the profile (boot, TUI "Save &
+  Apply", `perigee sriov retry`) replaces the retry; a reload stops it only
+  when the profile is removed or its PF or `[roce]` section changed, and
+  otherwise leaves it running; shutting down stops it.
 - **Turning it off does not undo it**: `enabled = false` or removing the
   section leaves the PF as it is. Revert manually (`dcb app del ...`,
   `dcb pfc set dev <pf> prio-pfc all:off`, `ethtool -A ...`) if needed.

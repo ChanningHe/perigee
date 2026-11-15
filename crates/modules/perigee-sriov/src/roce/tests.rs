@@ -10,14 +10,13 @@ fn cfg() -> RoceConfig {
 }
 
 /// serverhub today: nothing configured, global pause on, mlx5 default storm
-/// timeout, rdma_cm loaded but no group for mlx5_0.
+/// timeout.
 fn serverhub_state() -> PfQosState {
     PfQosState {
         dscp_prio: Ok(vec![]),
         pfc: Ok([false; 8]),
         pause: Ok(PAUSE_ON),
         storm_timeout_ms: Ok(8000),
-        roce_tos: Ok(None),
     }
 }
 
@@ -27,7 +26,6 @@ fn converged_state() -> PfQosState {
         pfc: Ok([false, false, false, true, false, false, false, false]),
         pause: Ok(PAUSE_OFF),
         storm_timeout_ms: Ok(100),
-        roce_tos: Ok(Some(106)),
     }
 }
 
@@ -48,7 +46,6 @@ fn fresh_host_at_boot_plans_every_step_in_order() {
             QosStep::SetPause(PAUSE_OFF),
             QosStep::Pfc(3),
             QosStep::StormTimeout(100),
-            QosStep::RoceTos(106),
         ]
     );
     assert!(p.errors.is_empty());
@@ -108,12 +105,11 @@ fn half_on_pause_is_turned_off_when_pfc_already_on() {
 }
 
 #[test]
-fn tos_follows_configured_dscp() {
+fn dscp_map_follows_configured_dscp() {
     let mut c = cfg();
     c.dscp = 24;
     let p = plan(&c, &converged_state(), Some(0));
-    assert!(p.steps.contains(&QosStep::RoceTos(98)));
-    assert!(p.steps.contains(&QosStep::DscpPrio(vec![(24, 3)])));
+    assert_eq!(p.steps, vec![QosStep::DscpPrio(vec![(24, 3)])]);
 }
 
 #[test]
@@ -121,10 +117,9 @@ fn unreadable_state_skips_step_with_error() {
     let mut s = serverhub_state();
     s.dscp_prio = Err("dcb: not found".into());
     s.storm_timeout_ms = Err("unsupported".into());
-    s.roce_tos = Err("no RDMA device".into());
     let p = boot_plan(&s);
     assert_eq!(p.steps, vec![QosStep::SetPause(PAUSE_OFF), QosStep::Pfc(3)]);
-    assert_eq!(p.errors.len(), 3);
+    assert_eq!(p.errors.len(), 2);
     assert!(p.errors.iter().any(|e| e.contains("dcb: not found")));
 }
 
@@ -161,7 +156,6 @@ fn live_host_defers_pfc_and_pause_but_applies_the_rest() {
         vec![
             QosStep::DscpPrio(vec![(26, 3), (48, 6)]),
             QosStep::StormTimeout(100),
-            QosStep::RoceTos(106),
         ]
     );
     assert_eq!(p.errors.len(), 1);
@@ -193,7 +187,7 @@ fn first_dscp_entry_on_live_host_warns_about_trust_switch() {
 // ── command building ──
 
 fn cmd(step: QosStep) -> (&'static str, Vec<String>) {
-    step_command("enp65s0np0", &step).unwrap()
+    step_command("enp65s0np0", &step)
 }
 
 fn strings(a: &[&str]) -> Vec<String> {
@@ -259,11 +253,6 @@ fn builds_ethtool_commands() {
     );
 }
 
-#[test]
-fn tos_is_a_configfs_write_not_a_command() {
-    assert!(step_command("enp65s0np0", &QosStep::RoceTos(106)).is_none());
-}
-
 // ── execution policy (injected executor) ──
 
 /// Run the boot plan for serverhub with `fail` deciding which exec calls fail
@@ -278,7 +267,7 @@ fn run_boot(fail: impl Fn(&QosStep) -> bool, pause_now: Pause) -> (Vec<QosStep>,
         |s| {
             calls.push(s.clone());
             if fail(s) {
-                Err(format!("{s:?} failed"))
+                Err(StepError::Failed(format!("{s:?} failed")))
             } else {
                 Ok(())
             }
@@ -345,7 +334,7 @@ fn pfc_failure_without_pause_change_does_not_touch_pause() {
         |st| {
             calls.push(st.clone());
             if matches!(st, QosStep::Pfc(_)) {
-                Err("pfc failed".into())
+                Err(StepError::Failed("pfc failed".into()))
             } else {
                 Ok(())
             }
@@ -372,4 +361,227 @@ fn live_plan_never_executes_pfc_or_pause() {
     assert!(!calls
         .iter()
         .any(|st| matches!(st, QosStep::Pfc(_) | QosStep::SetPause(_))));
+}
+
+// ── execution policy: timeouts ──
+
+fn timed_out(s: &QosStep) -> StepError {
+    StepError::TimedOut(format!("{s:?} timed out"))
+}
+
+/// Boot plan with `outcome` per exec call and `pause_now` per re-read.
+/// Returns executed steps, number of pause re-reads, and errors.
+fn run_boot_with(
+    outcome: impl Fn(&QosStep) -> Result<(), StepError>,
+    pause_now: Result<Pause, StepError>,
+) -> (Vec<QosStep>, usize, Vec<String>) {
+    let p = boot_plan(&serverhub_state());
+    let mut calls = Vec::new();
+    let mut rereads = 0;
+    let errors = execute_plan(
+        &p,
+        Some(PAUSE_ON),
+        |s| {
+            calls.push(s.clone());
+            outcome(s)
+        },
+        || {
+            rereads += 1;
+            pause_now.clone()
+        },
+    );
+    (calls, rereads, errors)
+}
+
+#[test]
+fn timeout_stops_the_plan_at_that_step() {
+    let (calls, _, errors) = run_boot_with(
+        |s| match s {
+            QosStep::DscpPrio(_) => Err(timed_out(s)),
+            _ => Ok(()),
+        },
+        Ok(PAUSE_OFF),
+    );
+    assert_eq!(calls.len(), 1, "nothing after the hung command: {calls:?}");
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].contains("3 remaining step(s) not attempted"));
+}
+
+#[test]
+fn pause_timeout_is_not_re_read_and_skips_pfc() {
+    let (calls, rereads, errors) = run_boot_with(
+        |s| match s {
+            QosStep::SetPause(_) => Err(timed_out(s)),
+            _ => Ok(()),
+        },
+        Ok(PAUSE_OFF),
+    );
+    assert_eq!(rereads, 0);
+    assert_eq!(calls.last(), Some(&QosStep::SetPause(PAUSE_OFF)));
+    assert!(!calls.contains(&QosStep::Pfc(3)));
+    assert_eq!(errors.len(), 1);
+    assert!(
+        errors[0].contains("may have NO flow control"),
+        "{}",
+        errors[0]
+    );
+}
+
+#[test]
+fn pause_reread_timeout_also_stops_the_plan() {
+    let (calls, rereads, errors) = run_boot_with(
+        |s| match s {
+            QosStep::SetPause(_) => Err(StepError::Failed("ethtool: exit 1".into())),
+            _ => Ok(()),
+        },
+        Err(StepError::TimedOut("ethtool -a timed out".into())),
+    );
+    assert_eq!(rereads, 1);
+    assert!(!calls.contains(&QosStep::Pfc(3)));
+    assert!(errors[0].contains("re-reading global pause"));
+    assert!(errors[0].contains("not attempted"));
+}
+
+#[test]
+fn pfc_timeout_still_restores_pause_once_then_stops() {
+    let (calls, rereads, errors) = run_boot_with(
+        |s| match s {
+            QosStep::Pfc(_) => Err(timed_out(s)),
+            _ => Ok(()),
+        },
+        Ok(PAUSE_OFF),
+    );
+    assert_eq!(
+        &calls[1..],
+        &[
+            QosStep::SetPause(PAUSE_OFF),
+            QosStep::Pfc(3),
+            QosStep::SetPause(PAUSE_ON),
+        ],
+        "storm timeout is not attempted after the hang"
+    );
+    assert_eq!(rereads, 0);
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].contains("restored to rx on tx on"));
+    assert!(errors[0].contains("1 remaining step(s) not attempted"));
+}
+
+#[test]
+fn pfc_timeout_with_failed_restore_says_flow_control_may_be_gone() {
+    let (calls, _, errors) = run_boot_with(
+        |s| match s {
+            QosStep::Pfc(_) => Err(timed_out(s)),
+            QosStep::SetPause(p) if *p == PAUSE_ON => Err(timed_out(s)),
+            _ => Ok(()),
+        },
+        Ok(PAUSE_OFF),
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|s| **s == QosStep::SetPause(PAUSE_ON))
+            .count(),
+        1,
+        "restore attempted exactly once"
+    );
+    assert!(errors[0].contains("may have NO flow control"));
+}
+
+// ── I/O glue with an injected command runner ──
+
+use super::tos::test_env::{FakeSys, PF};
+use crate::cmd::CmdError;
+use std::cell::RefCell;
+
+const PFC_OFF_JSON: &str = r#"{"prio_pfc":[false,false,false,false,false,false,false,false]}"#;
+const PAUSE_ON_TEXT: &str = "Pause parameters for x:\nAutonegotiate:\toff\nRX:\t\ton\nTX:\t\ton\n";
+
+/// serverhub's PF as seen by the tools; commands starting with `hang` time
+/// out. Every command line is recorded in `calls`.
+fn fake_run<'a>(
+    calls: &'a RefCell<Vec<String>>,
+    hang: &'a str,
+) -> impl Fn(&str, &[&str]) -> Result<String, CmdError> + 'a {
+    move |program, args| {
+        let cmd = std::iter::once(program)
+            .chain(args.iter().copied())
+            .collect::<Vec<_>>()
+            .join(" ");
+        calls.borrow_mut().push(cmd.clone());
+        if !hang.is_empty() && cmd.starts_with(hang) {
+            return Err(CmdError::TimedOut {
+                cmd,
+                timeout: CMD_TIMEOUT,
+            });
+        }
+        let out = match cmd.split(' ').take(3).collect::<Vec<_>>()[..] {
+            ["dcb", "-j", "app"] => "{}",
+            ["dcb", "-j", "pfc"] => PFC_OFF_JSON,
+            ["ethtool", "-a", _] => PAUSE_ON_TEXT,
+            ["ethtool", "--get-tunable", _] => "pfc-prevention-tout: 8000\n",
+            _ => "",
+        };
+        Ok(out.to_string())
+    }
+}
+
+fn apply_with(sys: &FakeSys, hang: &str) -> (QosOutcome, Vec<String>) {
+    let calls = RefCell::new(Vec::new());
+    let out = apply_checked(PF, &cfg(), Some(0), &fake_run(&calls, hang), &sys.paths);
+    (out, calls.into_inner())
+}
+
+fn ran(calls: &[String], prefix: &str) -> bool {
+    calls.iter().any(|c| c.starts_with(prefix))
+}
+
+#[test]
+fn healthy_run_issues_every_write_and_the_tos() {
+    let sys = FakeSys::new();
+    sys.add_rdma_device();
+    sys.add_configfs_group("0");
+    let (out, calls) = apply_with(&sys, "");
+    assert!(out.errors.is_empty(), "{:?}", out.errors);
+    assert_eq!(calls.len(), 8, "4 reads + 4 writes: {calls:?}");
+    assert_eq!(sys.read_tos(), "106");
+    assert_eq!(out.pending_tos, None);
+}
+
+#[test]
+fn command_timeout_skips_the_tos_write() {
+    let sys = FakeSys::new();
+    sys.add_rdma_device();
+    sys.add_configfs_group("0");
+    let (out, calls) = apply_with(&sys, "dcb app add");
+    assert_eq!(calls.len(), 5, "4 reads + the hung write: {calls:?}");
+    assert_eq!(sys.read_tos(), "0", "no ToS write after a timeout");
+    assert!(out.pending_tos.is_some(), "deferred to the daemon");
+    assert!(out.errors.iter().any(|e| e.contains("not attempted")));
+}
+
+#[test]
+fn command_timeout_skips_modprobe() {
+    let sys = FakeSys::new();
+    sys.add_rdma_device(); // configfs missing: the ToS step would modprobe
+    let (_, calls) = apply_with(&sys, "dcb app add");
+    assert!(!ran(&calls, "modprobe"), "{calls:?}");
+    let (_, calls) = apply_with(&sys, "");
+    assert!(
+        ran(&calls, "modprobe"),
+        "control: modprobe without a timeout"
+    );
+}
+
+#[test]
+fn read_timeout_skips_the_remaining_reads_and_all_writes() {
+    let sys = FakeSys::new();
+    sys.add_rdma_device();
+    sys.add_configfs_group("0");
+    let (out, calls) = apply_with(&sys, "dcb -j app");
+    assert_eq!(calls, ["dcb -j app show dev enp65s0np0"]);
+    assert_eq!(sys.read_tos(), "0");
+    assert!(out
+        .errors
+        .iter()
+        .any(|e| e.contains("reading the PF state timed out")));
 }

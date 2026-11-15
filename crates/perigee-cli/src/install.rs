@@ -11,6 +11,9 @@ const REPO: &str = "channinghe/perigee";
 const SERVICE_CONTENT: &str = r#"[Unit]
 Description=Perigee - Proxmox VE Helper Daemon
 After=network-pre.target systemd-udev-settle.service
+# rdma_cm's configfs tree (RoCE default ToS). Needed explicitly because
+# DefaultDependencies=no drops the implicit ordering after sysinit.target.
+After=sys-kernel-config.mount
 Before=network.target
 DefaultDependencies=no
 

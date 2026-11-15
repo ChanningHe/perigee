@@ -3,8 +3,10 @@ use perigee_core::mac::MacAddress;
 use perigee_core::sysfs;
 use tracing::{info, warn};
 
+use crate::cmd::{self, CmdError, CMD_TIMEOUT};
 use crate::config::{SriovProfileConfig, VfLinkState, VfOverride, VlanConfig};
 use crate::mac_strategy::MacStrategy;
+use crate::roce::tos::PendingTos;
 
 /// Apply a complete SR-IOV profile: create VFs and configure each one.
 pub fn apply_profile(profile_name: &str, config: &SriovProfileConfig) -> Result<ApplyResult> {
@@ -34,10 +36,12 @@ pub fn apply_profile(profile_name: &str, config: &SriovProfileConfig) -> Result<
         configured_vfs: 0,
         errors: Vec::new(),
         warnings: Vec::new(),
+        pending_tos: None,
     };
 
     // Step 1: Ensure PF is up
-    if let Err(e) = set_link_up(&pf_iface) {
+    let link_up = set_link_up(&system_ip, &pf_iface);
+    if let Err(e) = &link_up {
         warn!(pf = %pf_iface, error = %e, "failed to bring PF up");
     }
 
@@ -52,6 +56,7 @@ pub fn apply_profile(profile_name: &str, config: &SriovProfileConfig) -> Result<
         let outcome = crate::roce::apply_pf_qos(&pf_iface, roce, numvfs);
         result.errors.extend(outcome.errors);
         result.warnings.extend(outcome.warnings);
+        result.pending_tos = outcome.pending_tos;
     }
 
     // Step 3: Create/reset VFs only if count differs
@@ -84,41 +89,15 @@ pub fn apply_profile(profile_name: &str, config: &SriovProfileConfig) -> Result<
         ));
     }
 
-    // Step 4: Generate MACs
-    let strategy = MacStrategy::from_config(&config.mac_strategy, &config.mac);
-    let macs = strategy.generate(actual);
-
-    // Current link states, so `state` is only written where it differs. A
-    // failed read leaves every VF "unknown" (see needs_link_state_write).
-    let live_states = read_actual_vf_states(&pf_iface).unwrap_or_else(|e| {
-        warn!(pf = %pf_iface, error = %e, "cannot read VF link states");
-        Vec::new()
-    });
-
-    // Step 5: Configure each VF
-    for vf_index in 0..actual {
-        let vf_mac = get_vf_mac(vf_index, &macs, &config.vf);
-        let flags = vf_flags(vf_index, config);
-        let vlan = get_vf_vlan(vf_index, config);
-        let live_link_state = live_states
-            .iter()
-            .find(|s| s.index == vf_index)
-            .and_then(|s| s.link_state);
-
-        match configure_single_vf(
-            &pf_iface,
-            vf_index,
-            &vf_mac,
-            flags,
-            vlan.as_ref(),
-            live_link_state,
-        ) {
-            Ok(()) => result.configured_vfs += 1,
-            Err(e) => result
-                .errors
-                .push(format!("VF#{} config failed: {}", vf_index, e)),
-        }
-    }
+    // Step 4: Configure each VF
+    configure_stage(
+        &pf_iface,
+        config,
+        actual,
+        link_up.err(),
+        &system_ip,
+        &mut result,
+    );
 
     info!(
         profile = %profile_name,
@@ -140,6 +119,10 @@ pub struct ApplyResult {
     pub errors: Vec<String>,
     /// Notable but non-failing conditions (e.g. a PF link flap on a live host).
     pub warnings: Vec<String>,
+    /// RoCE ToS write waiting for the RDMA device or rdma_cm configfs; not
+    /// counted as an error. Only the daemon retries it in the background, so
+    /// any other caller must report it as an error.
+    pub pending_tos: Option<PendingTos>,
 }
 
 impl ApplyResult {
@@ -244,7 +227,113 @@ fn vf_ip_link_commands(
     cmds
 }
 
+const IP_HUNG: &str = "VFs left unconfigured because `ip` is hanging (netlink stuck?)";
+
+/// Runs `ip <args>`; injectable for tests.
+type IpRunner<'a> = &'a dyn Fn(&[&str]) -> Result<String, CmdError>;
+
+fn system_ip(args: &[&str]) -> Result<String, CmdError> {
+    cmd::run("ip", args, CMD_TIMEOUT)
+}
+
+fn is_timeout(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<CmdError>()
+        .is_some_and(CmdError::is_timeout)
+}
+
+/// Step 4. A timed-out `ip link set <pf> up` means netlink is hung: the VF
+/// commands would hang as well, so they are skipped (the VFs themselves are
+/// created through sysfs).
+fn configure_stage(
+    pf: &str,
+    config: &SriovProfileConfig,
+    count: u32,
+    link_up_err: Option<anyhow::Error>,
+    ip: IpRunner,
+    result: &mut ApplyResult,
+) {
+    match link_up_err.filter(is_timeout) {
+        Some(e) => result.errors.push(format!("{e}; {IP_HUNG}")),
+        None => configure_all_vfs(pf, config, count, ip, result),
+    }
+}
+
+/// MAC, flags, VLAN and link state for VFs `0..count`.
+fn configure_all_vfs(
+    pf: &str,
+    config: &SriovProfileConfig,
+    count: u32,
+    ip: IpRunner,
+    result: &mut ApplyResult,
+) {
+    let live_states = match live_link_states(pf, config, count, ip) {
+        Ok(states) => states,
+        Err(e) => {
+            result.errors.push(e);
+            return;
+        }
+    };
+    let macs = MacStrategy::from_config(&config.mac_strategy, &config.mac).generate(count);
+    let (configured, errors) = configure_vfs(count, |i| {
+        let live = live_states
+            .iter()
+            .find(|s| s.index == i)
+            .and_then(|s| s.link_state);
+        let vlan = get_vf_vlan(i, config);
+        let mac = get_vf_mac(i, &macs, &config.vf);
+        configure_single_vf(ip, pf, i, &mac, vf_flags(i, config), vlan.as_ref(), live)
+    });
+    result.configured_vfs = configured;
+    result.errors.extend(errors);
+}
+
+/// Current VF link states, so `state` is only written where it differs. Read
+/// only when some VF manages its link state (nothing else uses them); a
+/// failed read leaves every VF "unknown" (see needs_link_state_write). `Err`
+/// when `ip` hung.
+fn live_link_states(
+    pf: &str,
+    config: &SriovProfileConfig,
+    count: u32,
+    ip: IpRunner,
+) -> Result<Vec<VfActualState>, String> {
+    if !(0..count).any(|i| vf_flags(i, config).link_state.is_some()) {
+        return Ok(Vec::new());
+    }
+    match read_vf_states(ip, pf) {
+        Ok(states) => Ok(states),
+        Err(e) if is_timeout(&e) => Err(format!("{e}; {IP_HUNG}")),
+        Err(e) => {
+            warn!(pf = %pf, error = %e, "cannot read VF link states");
+            Ok(Vec::new())
+        }
+    }
+}
+
+/// Run `configure` for VFs `0..count`, returning how many succeeded and the
+/// errors. The first timeout stops the loop: netlink is stuck, and going on
+/// would cost a [`CMD_TIMEOUT`] per command for every remaining VF.
+fn configure_vfs(count: u32, mut configure: impl FnMut(u32) -> Result<()>) -> (u32, Vec<String>) {
+    let mut configured = 0;
+    let mut errors = Vec::new();
+    for i in 0..count {
+        match configure(i) {
+            Ok(()) => configured += 1,
+            Err(e) if is_timeout(&e) => {
+                let left = count - i - 1;
+                errors.push(format!(
+                    "VF#{i} config failed: {e}; stopped, {left} remaining VF(s) left unconfigured"
+                ));
+                break;
+            }
+            Err(e) => errors.push(format!("VF#{i} config failed: {e}")),
+        }
+    }
+    (configured, errors)
+}
+
 fn configure_single_vf(
+    ip: IpRunner,
     pf: &str,
     index: u32,
     mac: &MacAddress,
@@ -254,7 +343,7 @@ fn configure_single_vf(
 ) -> Result<()> {
     for args in vf_ip_link_commands(pf, index, mac, flags, vlan, actual_link_state) {
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        run_ip_link(&args_ref)?;
+        run_ip_link(ip, &args_ref)?;
     }
 
     let vlan_str = vlan
@@ -294,20 +383,11 @@ pub struct VfActualState {
 
 /// Read actual VF states from `ip -d link show <pf>`.
 pub fn read_actual_vf_states(pf_iface: &str) -> Result<Vec<VfActualState>> {
-    let output = std::process::Command::new("ip")
-        .args(["-d", "link", "show", pf_iface])
-        .output()
-        .context("failed to execute `ip link show`")?;
+    read_vf_states(&system_ip, pf_iface)
+}
 
-    if !output.status.success() {
-        bail!(
-            "ip link show {} failed: {}",
-            pf_iface,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
+fn read_vf_states(ip: IpRunner, pf_iface: &str) -> Result<Vec<VfActualState>> {
+    let stdout = ip(&["-d", "link", "show", pf_iface])?;
     Ok(parse_vf_lines(&stdout))
 }
 
@@ -367,22 +447,24 @@ fn parse_vf_lines(output: &str) -> Vec<VfActualState> {
     results
 }
 
-fn set_link_up(iface: &str) -> Result<()> {
-    run_ip_link(&["set", iface, "up"])
+fn set_link_up(ip: IpRunner, iface: &str) -> Result<()> {
+    run_ip_link(ip, &["set", iface, "up"])
 }
 
-fn run_ip_link(args: &[&str]) -> Result<()> {
-    let output = std::process::Command::new("ip")
-        .arg("link")
-        .args(args)
-        .output()
-        .context("failed to execute `ip link`")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("ip link {} failed: {}", args.join(" "), stderr.trim());
-    }
-    Ok(())
+/// `ip link <args>`. Every call is a write, so a timeout leaves the setting
+/// in an unknown state; the typed [`CmdError`] stays reachable via downcast.
+fn run_ip_link(ip: IpRunner, args: &[&str]) -> Result<()> {
+    let full: Vec<&str> = std::iter::once("link")
+        .chain(args.iter().copied())
+        .collect();
+    ip(&full).map(drop).map_err(|e| {
+        let msg = if e.is_timeout() {
+            format!("{e}; that link/VF setting is now in an unknown state")
+        } else {
+            e.to_string()
+        };
+        anyhow::Error::new(e).context(msg)
+    })
 }
 
 #[cfg(test)]
@@ -526,6 +608,131 @@ link_state = "auto"
         assert!(!f2.trust);
         assert!(!f2.spoofchk);
         assert_eq!(f2.link_state, Some(VfLinkState::Auto));
+    }
+
+    fn timeout_err() -> anyhow::Error {
+        let e = CmdError::TimedOut {
+            cmd: "ip link set p vf 2 mac x".into(),
+            timeout: CMD_TIMEOUT,
+        };
+        anyhow::Error::new(e).context("wrapped")
+    }
+
+    #[test]
+    fn vf_loop_stops_at_first_timeout() {
+        let mut tried = Vec::new();
+        let (configured, errors) = configure_vfs(64, |i| {
+            tried.push(i);
+            if i == 2 {
+                Err(timeout_err())
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(tried, [0, 1, 2]);
+        assert_eq!(configured, 2);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("61 remaining VF(s) left unconfigured"));
+    }
+
+    #[test]
+    fn vf_loop_continues_past_ordinary_failures() {
+        let (configured, errors) = configure_vfs(4, |i| {
+            if i == 1 {
+                bail!("RTNETLINK answers: Invalid argument")
+            }
+            Ok(())
+        });
+        assert_eq!(configured, 3);
+        assert_eq!(
+            errors,
+            ["VF#1 config failed: RTNETLINK answers: Invalid argument"]
+        );
+    }
+
+    const LINK_STATE_PROFILE: &str = "[sriov.p]\nmac = \"8c:2a:8e:88:9a:f6\"\nnum_vfs = 3\n\
+                                      [sriov.p.defaults]\nlink_state = \"enable\"\n";
+    const PLAIN_PROFILE: &str = "[sriov.p]\nmac = \"8c:2a:8e:88:9a:f6\"\nnum_vfs = 3\n";
+
+    fn profile(text: &str) -> SriovProfileConfig {
+        toml::from_str::<SriovFileConfig>(text).unwrap().sriov["p"].clone()
+    }
+
+    fn empty_result() -> ApplyResult {
+        ApplyResult {
+            pf_iface: "p".into(),
+            total_vfs: 3,
+            created_vfs: 3,
+            configured_vfs: 0,
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            pending_tos: None,
+        }
+    }
+
+    /// Fake `ip` recording each call; calls starting with `hang` time out.
+    fn fake_ip<'a>(
+        calls: &'a std::cell::RefCell<Vec<String>>,
+        hang: &'a str,
+    ) -> impl Fn(&[&str]) -> std::result::Result<String, CmdError> + 'a {
+        move |args| {
+            let cmd = args.join(" ");
+            calls.borrow_mut().push(cmd.clone());
+            if !hang.is_empty() && cmd.starts_with(hang) {
+                return Err(CmdError::TimedOut {
+                    cmd,
+                    timeout: CMD_TIMEOUT,
+                });
+            }
+            Ok(String::new())
+        }
+    }
+
+    fn stage(
+        text: &str,
+        link_up_err: Option<anyhow::Error>,
+        hang: &str,
+    ) -> (ApplyResult, Vec<String>) {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let mut result = empty_result();
+        configure_stage(
+            "p",
+            &profile(text),
+            3,
+            link_up_err,
+            &fake_ip(&calls, hang),
+            &mut result,
+        );
+        (result, calls.into_inner())
+    }
+
+    #[test]
+    fn link_state_read_timeout_aborts_vf_configuration() {
+        let (result, calls) = stage(LINK_STATE_PROFILE, None, "-d link show");
+        assert_eq!(calls, ["-d link show p"]);
+        assert_eq!(result.configured_vfs, 0);
+        assert!(result.errors[0].contains(IP_HUNG), "{:?}", result.errors);
+    }
+
+    #[test]
+    fn link_states_are_read_only_when_managed() {
+        let (result, calls) = stage(PLAIN_PROFILE, None, "-d link show");
+        assert!(!calls.iter().any(|c| c.starts_with("-d")), "{calls:?}");
+        assert_eq!(result.configured_vfs, 3);
+        let (result, calls) = stage(LINK_STATE_PROFILE, None, "");
+        assert!(calls[0].starts_with("-d link show"));
+        assert_eq!(result.configured_vfs, 3);
+    }
+
+    #[test]
+    fn link_up_timeout_skips_vf_configuration() {
+        let (result, calls) = stage(PLAIN_PROFILE, Some(timeout_err()), "");
+        assert!(calls.is_empty(), "{calls:?}");
+        assert!(result.errors[0].contains(IP_HUNG));
+        // Control: an ordinary link-up failure still configures the VFs.
+        let (result, calls) = stage(PLAIN_PROFILE, Some(anyhow::anyhow!("EPERM")), "");
+        assert!(!calls.is_empty());
+        assert_eq!(result.configured_vfs, 3);
     }
 
     #[test]

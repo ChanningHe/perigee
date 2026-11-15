@@ -1,3 +1,4 @@
+pub mod cmd;
 pub mod config;
 pub mod daemon;
 pub mod detect;
