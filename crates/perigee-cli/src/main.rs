@@ -223,6 +223,11 @@ async fn handle_sriov_cli(action: SriovAction) -> Result<()> {
                             .map_or_else(|| "invalid".to_string(), |t| t.to_string())
                     ),
                 }
+                println!(
+                    "RX Ring:      {}",
+                    p.rx_ring
+                        .map_or_else(|| "unmanaged".to_string(), |n| n.to_string())
+                );
                 println!("FDB Mode:     {:?}", p.fdb.mode);
 
                 if let Some(iface) = pf_iface {

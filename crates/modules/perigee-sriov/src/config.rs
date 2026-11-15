@@ -21,6 +21,11 @@ pub struct SriovProfileConfig {
     pub num_vfs: u32,
     #[serde(default = "default_mac_strategy")]
     pub mac_strategy: MacStrategyConfig,
+    /// PF RX ring size (`ethtool -G <pf> rx N`). Absent (the default): the
+    /// ring is never read or written. Checked (> 0) by the ring step, so a
+    /// bad value never blocks VF creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rx_ring: Option<u32>,
     #[serde(default)]
     pub defaults: VfDefaults,
     #[serde(default)]
@@ -442,6 +447,16 @@ mode = "daemon_watch"
     fn profile_from(toml_str: &str) -> SriovProfileConfig {
         let config: SriovFileConfig = toml::from_str(toml_str).unwrap();
         config.sriov.into_values().next().unwrap()
+    }
+
+    #[test]
+    fn legacy_config_leaves_rx_ring_unmanaged() {
+        // None means the ring step runs no command at all
+        // (pf_ring::tests::absent_key_runs_no_command).
+        assert_eq!(profile_from(LEGACY_TOML).rx_ring, None);
+        let p =
+            profile_from("[sriov.p]\nmac = \"8c:2a:8e:88:9a:f6\"\nnum_vfs = 4\nrx_ring = 8192\n");
+        assert_eq!(p.rx_ring, Some(8192));
     }
 
     #[test]

@@ -48,18 +48,25 @@ pub fn apply_profile(profile_name: &str, config: &SriovProfileConfig) -> Result<
     let numvfs = sysfs::read_sriov_numvfs(&pf_iface).ok();
     let current = numvfs.unwrap_or(0);
 
-    // Step 2: Opt-in PF RoCE/lossless QoS, before any VF is (re)created. The
+    // Step 2: Opt-in PF RX ring. Only the PF netdev's queues are rebuilt (no
+    // link flap), so it is applied live too. Failures never block VFs; a
+    // timeout (ethtool hung) also skips the RoCE commands below.
+    let ring = crate::pf_ring::apply_rx_ring(&pf_iface, config.rx_ring, numvfs != Some(0));
+    result.errors.extend(ring.errors);
+    result.warnings.extend(ring.warnings);
+
+    // Step 3: Opt-in PF RoCE/lossless QoS, before any VF is (re)created. The
     // PFC change toggles the PF link once, so it is only made while no VFs
     // exist (boot); with VFs present (or an unreadable count) it is deferred.
     // Only what differs is written. Failures never block VF creation.
     if let Some(roce) = config.enabled_roce() {
-        let outcome = crate::roce::apply_pf_qos(&pf_iface, roce, numvfs);
+        let outcome = crate::roce::apply_pf_qos(&pf_iface, roce, numvfs, ring.timed_out);
         result.errors.extend(outcome.errors);
         result.warnings.extend(outcome.warnings);
         result.pending_tos = outcome.pending_tos;
     }
 
-    // Step 3: Create/reset VFs only if count differs
+    // Step 4: Create/reset VFs only if count differs
     if current == config.num_vfs {
         info!(pf = %pf_iface, vfs = current, "VF count already matches, skipping reset");
     } else {
@@ -89,7 +96,7 @@ pub fn apply_profile(profile_name: &str, config: &SriovProfileConfig) -> Result<
         ));
     }
 
-    // Step 4: Configure each VF
+    // Step 5: Configure each VF
     configure_stage(
         &pf_iface,
         config,

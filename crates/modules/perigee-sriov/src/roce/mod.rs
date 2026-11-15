@@ -368,9 +368,18 @@ pub struct QosOutcome {
 /// and report problems as errors. Never fatal to the caller: VF creation
 /// proceeds whatever happens here. A hung command costs at most two
 /// [`CMD_TIMEOUT`]s (the failed write plus the pause restore).
-pub fn apply_pf_qos(pf: &str, cfg: &RoceConfig, existing_vfs: Option<u32>) -> QosOutcome {
+///
+/// `ethtool_hung`: an earlier `ethtool` command (the RX ring step) timed out,
+/// so no RoCE command is issued and the ToS is deferred as pending.
+pub fn apply_pf_qos(
+    pf: &str,
+    cfg: &RoceConfig,
+    existing_vfs: Option<u32>,
+    ethtool_hung: bool,
+) -> QosOutcome {
+    let (run, paths) = (&system_run, &TosPaths::system());
     match check_supported(pf, cfg) {
-        Ok(()) => apply_checked(pf, cfg, existing_vfs, &system_run, &TosPaths::system()),
+        Ok(()) => apply_checked(pf, cfg, existing_vfs, ethtool_hung, run, paths),
         Err(e) => QosOutcome {
             errors: vec![e],
             ..QosOutcome::default()
@@ -386,11 +395,16 @@ fn apply_checked(
     pf: &str,
     cfg: &RoceConfig,
     existing_vfs: Option<u32>,
+    ethtool_hung: bool,
     run: Runner,
     paths: &TosPaths,
 ) -> QosOutcome {
     let mut out = QosOutcome::default();
-    let timed_out = apply_commands(pf, cfg, existing_vfs, run, &mut out);
+    if ethtool_hung {
+        out.errors
+            .push("roce: PF QoS not attempted because an earlier ethtool command timed out".into());
+    }
+    let timed_out = ethtool_hung || apply_commands(pf, cfg, existing_vfs, run, &mut out);
     match cfg.roce_tos() {
         Some(tos) => apply_tos(pf, tos, timed_out, run, paths, &mut out),
         None => out.errors.push(format!(

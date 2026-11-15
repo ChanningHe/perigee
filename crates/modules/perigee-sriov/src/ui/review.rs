@@ -130,6 +130,14 @@ fn render_summary(frame: &mut Frame, sriov: &SriovState, area: Rect) {
                 common::style_warn(),
             )));
         }
+        // Edited only in sriov.toml; shown when managed.
+        if let Some(rx) = profile.rx_ring {
+            lines.push(Line::from(vec![
+                Span::styled("    ", Style::default()),
+                Span::styled("RX ring:    ", common::style_label()),
+                Span::styled(rx.to_string(), common::style_value()),
+            ]));
+        }
 
         lines.push(Line::from(""));
 
@@ -260,5 +268,51 @@ pub fn handle_input(sriov: &mut SriovState, key: KeyEvent) {
         KeyCode::Up => sriov.review_scroll = sriov.review_scroll.saturating_sub(1),
         KeyCode::Down => sriov.review_scroll = sriov.review_scroll.saturating_add(1),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SriovState;
+    use crate::config::SriovFileConfig;
+
+    const WITH_RING: &str =
+        "[sriov.ring]\nmac = \"8c:2a:8e:88:9a:f6\"\nnum_vfs = 4\nrx_ring = 8192\n\n\
+                             [sriov.plain]\nmac = \"8c:2a:8e:88:9a:f7\"\nnum_vfs = 2\n";
+
+    /// Save one profile through the TUI path and reload the whole file.
+    fn save_and_reload(edit: &str) -> (SriovFileConfig, String) {
+        let dir = std::env::temp_dir().join(format!("perigee-ring-{edit}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sriov.toml");
+        std::fs::write(&path, WITH_RING).unwrap();
+        let mut sriov = SriovState::new();
+        sriov.editing_name = edit.to_string();
+        sriov.editing_profile = Some(SriovFileConfig::load(&path).unwrap().sriov[edit].clone());
+        sriov.editing_profile.as_mut().unwrap().num_vfs = 8;
+        sriov.save_config_to(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let saved = SriovFileConfig::load(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        (saved, text)
+    }
+
+    #[test]
+    fn rx_ring_survives_a_tui_save() {
+        let (saved, _) = save_and_reload("ring");
+        assert_eq!(saved.sriov["ring"].num_vfs, 8, "the edit itself was saved");
+        assert_eq!(saved.sriov["ring"].rx_ring, Some(8192));
+        assert_eq!(saved.sriov["plain"].rx_ring, None);
+    }
+
+    #[test]
+    fn absent_rx_ring_stays_absent_after_a_tui_save() {
+        let (saved, text) = save_and_reload("plain");
+        assert_eq!(saved.sriov["plain"].rx_ring, None);
+        assert_eq!(
+            text.matches("rx_ring").count(),
+            1,
+            "only the other profile's: {text}"
+        );
     }
 }

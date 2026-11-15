@@ -526,9 +526,28 @@ fn fake_run<'a>(
 }
 
 fn apply_with(sys: &FakeSys, hang: &str) -> (QosOutcome, Vec<String>) {
+    apply_after(sys, hang, false)
+}
+
+fn apply_after(sys: &FakeSys, hang: &str, ethtool_hung: bool) -> (QosOutcome, Vec<String>) {
     let calls = RefCell::new(Vec::new());
-    let out = apply_checked(PF, &cfg(), Some(0), &fake_run(&calls, hang), &sys.paths);
+    let out = {
+        let run = fake_run(&calls, hang);
+        apply_checked(PF, &cfg(), Some(0), ethtool_hung, &run, &sys.paths)
+    };
     (out, calls.into_inner())
+}
+
+#[test]
+fn ring_step_timeout_skips_all_roce_commands_and_defers_tos() {
+    let sys = FakeSys::new();
+    sys.add_rdma_device();
+    sys.add_configfs_group("0");
+    let (out, calls) = apply_after(&sys, "", true);
+    assert!(calls.is_empty(), "{calls:?}");
+    assert_eq!(sys.read_tos(), "0");
+    assert!(out.pending_tos.is_some());
+    assert!(out.errors.iter().any(|e| e.contains("not attempted")));
 }
 
 fn ran(calls: &[String], prefix: &str) -> bool {

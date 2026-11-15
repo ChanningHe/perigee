@@ -4,6 +4,7 @@ pub mod daemon;
 pub mod detect;
 pub mod fdb;
 pub mod mac_strategy;
+pub mod pf_ring;
 mod pve_conf;
 pub mod roce;
 pub mod ui;

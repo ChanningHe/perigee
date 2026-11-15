@@ -103,6 +103,7 @@ keyed by a profile name:
 mac = "8c:2a:8e:88:9a:f6"     # PF MAC (stable PF identifier)
 num_vfs = 64
 mac_strategy = "sequential"   # sequential | random | custom
+rx_ring = 8192                # optional PF RX ring size; absent = unmanaged
 
 [sriov.enp65s0np0.defaults]   # applied to every VF
 trust = true                  # default true
@@ -143,6 +144,40 @@ perigee reads the current state first and only issues `state` for managed
 VFs whose state differs. A config without `link_state` behaves exactly as
 before. The TUI cycles the value unmanaged -> auto -> enable -> disable and
 only writes `link_state` to the file when one is chosen.
+
+### PF RX ring (`rx_ring`, optional)
+
+`rx_ring = N` keeps the PF's RX ring at `N` entries (`ethtool -G <pf> rx N`),
+e.g. when the default ring overflows under bursts (`rx_out_of_buffer`
+growing). Without the key perigee never reads or writes the ring; a config
+without it behaves exactly as before. `N` must be greater than 0.
+
+- **Idempotent**: perigee reads `ethtool -g <pf>` and writes only when the
+  current RX value differs. A value above the device's pre-set maximum is
+  reported with both numbers and not written; an unreadable ring is not
+  written.
+- **Rounding**: after a write perigee reads the ring back. Drivers may round
+  (mlx5 rounds up to a power of two); if the device then reports another
+  value, a warning names it and asks to set `rx_ring` to that value, since
+  otherwise every apply rebuilds the PF's queues again.
+- **Applied live, too**: changing the ring rebuilds the PF netdev's queues
+  (about 1.5 s on a ConnectX-5, the netdev's carrier toggles once) but does
+  not flap the physical link, and VFs and RDMA sessions are not affected. So
+  it is applied at boot and on every live apply (TUI "Save & Apply",
+  `perigee sriov retry`). A live change records a warning that traffic on the
+  PF netdev (the host and guests bridged on it) was interrupted for about a
+  second. It runs after the PF is brought up, before the RoCE step and VF
+  creation.
+- **Failures never block VFs**: a failed or timed-out ring step is reported
+  and the profile shows as degraded; a timeout also skips the RoCE commands
+  (`ethtool` is hung), and the RoCE ToS then goes pending as described below.
+- **Removing the key does not undo it**: the ring stays at its last value
+  until changed by hand or reboot.
+- **PF only**: VF rings are configured inside each guest and are not
+  inherited from the PF.
+
+The TUI shows `rx_ring` in the review summary when set (edit it in
+`sriov.toml`); `perigee sriov show` prints it.
 
 ### PF RoCE / lossless Ethernet (`roce`, opt-in, mlx5 only)
 
@@ -211,10 +246,12 @@ Behaviour:
   timeout the RoCE step issues no further commands, except restoring global
   pause once if the hung command was the PFC write; VFs are still created.
   In the per-VF `ip link set` loop the first timeout stops the remaining VFs
-  (reported as an error). A hung tool therefore adds at most about 30 s per
-  profile to boot instead of blocking READY until systemd's 120 s start
-  timeout. Profiles are applied one after another, so this adds up per PF:
-  four PFs that all hang reach `TimeoutStartSec=120`. Only external commands
+  (reported as an error). A timeout in the RX ring step also counts as the
+  RoCE step's first timeout. A hung tool therefore adds at most about 32 s
+  per profile to boot (30 s of timeouts plus a successful ring write) instead
+  of blocking READY until systemd's 120 s start timeout. Profiles are applied
+  one after another, so this adds up per PF: three PFs that all hang stay
+  under `TimeoutStartSec=120`, four exceed it. Only external commands
   are covered: sysfs/configfs writes (`sriov_numvfs`, the rdma_cm configfs
   mkdir/write) have no timeout. A process stuck in the kernel that ignores
   SIGKILL is left behind.

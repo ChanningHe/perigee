@@ -603,6 +603,7 @@ fn ensure_editing_profile(sriov: &mut SriovState) {
             vf: Vec::new(),
             fdb: crate::config::FdbConfig::default(),
             roce: None,
+            rx_ring: None,
         });
     }
 }
