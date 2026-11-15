@@ -15,7 +15,7 @@ use perigee_core::ipc::{EventLevel, ProfileEvent};
 use tokio::time::Instant;
 use tracing::{error, info};
 
-use super::tos::{prepare, write_if_differs, PendingTos, TosAttempt, TosPaths};
+use super::tos::{guarded_load, prepare, write_if_differs, PendingTos, TosAttempt, TosPaths};
 use super::StepError;
 
 /// How often a pending ToS write is retried.
@@ -88,6 +88,11 @@ impl TosRetry {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn generation(&self, profile: &str) -> u64 {
+        self.lock().get(profile).map_or(0, |s| s.generation)
+    }
+
     pub fn outcome(&self, profile: &str) -> Option<ProfileEvent> {
         self.lock().get(profile).and_then(|s| s.outcome.clone())
     }
@@ -115,18 +120,21 @@ impl TosRetry {
         }
     }
 
-    async fn run(self, profile: String, pending: PendingTos, generation: u64) {
+    async fn run(self, profile: String, mut pending: PendingTos, generation: u64) {
         let deadline = Instant::now() + self.env.limit;
         loop {
             tokio::time::sleep(self.env.interval).await;
-            let (this, p, pend) = (self.clone(), profile.clone(), pending.clone());
+            let (this, p, mut pend) = (self.clone(), profile.clone(), pending.clone());
             let attempt = match tokio::task::spawn_blocking(move || {
-                this.attempt(&p, &pend, generation)
+                (this.attempt(&p, &mut pend, generation), pend)
             })
             .await
             {
-                Ok(Some(a)) => a,
-                Ok(None) => return, // replaced or cancelled
+                Ok((Some(a), pend)) => {
+                    pending = pend; // keeps skip_modprobe
+                    a
+                }
+                Ok((None, _)) => return, // replaced or cancelled
                 Err(e) => TosAttempt::Failed(format!("retry attempt panicked: {e}")),
             };
             let expired = Instant::now() >= deadline;
@@ -139,7 +147,12 @@ impl TosRetry {
 
     /// One attempt; `None` once no longer current. The write happens under
     /// the lock so that `cancel` cannot return while it is in flight.
-    fn attempt(&self, profile: &str, pending: &PendingTos, generation: u64) -> Option<TosAttempt> {
+    fn attempt(
+        &self,
+        profile: &str,
+        pending: &mut PendingTos,
+        generation: u64,
+    ) -> Option<TosAttempt> {
         let current = |slots: &BTreeMap<String, Slot>| {
             slots.get(profile).map(|s| s.generation) == Some(generation)
         };
@@ -147,12 +160,18 @@ impl TosRetry {
             return None;
         }
         // May run `modprobe rdma_cm`, so done without holding the lock.
-        let ibdev = match prepare(&self.env.paths, &pending.pf, self.env.load_rdma_cm) {
+        let PendingTos {
+            pf,
+            tos,
+            skip_modprobe,
+        } = pending;
+        let load = || guarded_load(skip_modprobe, self.env.load_rdma_cm);
+        let ibdev = match prepare(&self.env.paths, pf, load) {
             Ok(d) => d,
             Err(attempt) => return Some(attempt),
         };
         let slots = self.lock();
-        current(&slots).then(|| write_if_differs(&self.env.paths, &ibdev, pending.tos))
+        current(&slots).then(|| write_if_differs(&self.env.paths, &ibdev, *tos))
     }
 
     fn finish(&self, profile: &str, generation: u64, level: EventLevel, msg: String) {
@@ -224,6 +243,7 @@ pub(crate) mod tests {
         PendingTos {
             pf: PF.to_string(),
             tos: 106,
+            skip_modprobe: false,
         }
     }
 
@@ -298,8 +318,13 @@ pub(crate) mod tests {
         Err(StepError::TimedOut("`modprobe rdma_cm` timed out".into()))
     }
 
+    /// The kernel finishes loading rdma_cm after modprobe was killed.
+    fn configfs_appears_late(sys: &FakeSys) {
+        sys.add_configfs_group("0");
+    }
+
     #[tokio::test]
-    async fn modprobe_timeout_fails_the_retry_and_is_not_repeated() {
+    async fn modprobe_timeout_is_not_repeated_and_the_retry_keeps_polling() {
         let sys = FakeSys::new();
         sys.add_rdma_device(); // configfs missing: modprobe is needed
         let env = TosEnv {
@@ -308,10 +333,42 @@ pub(crate) mod tests {
         };
         let r = TosRetry::new(env);
         r.start(PROFILE, Some(&pending()));
-        assert!(wait_for(|| r.failed(PROFILE)).await);
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(MODPROBES.load(Ordering::SeqCst), 1);
-        assert!(outcome_message(&r).contains("not retried"));
+        assert!(wait_for(|| MODPROBES.load(Ordering::SeqCst) == 1).await);
+        tokio::time::sleep(Duration::from_millis(60)).await; // several intervals
+        assert_eq!(MODPROBES.load(Ordering::SeqCst), 1, "never run again");
+        assert!(r.outcome(PROFILE).is_none(), "still pending, not failed");
+        configfs_appears_late(&sys);
+        assert!(wait_for(|| r.outcome(PROFILE).is_some()).await);
+        assert_eq!(sys.read_tos(), "106");
+        assert!(!r.failed(PROFILE));
+    }
+
+    static HANDOFF_PROBES: AtomicUsize = AtomicUsize::new(0);
+
+    fn counted_modprobe() -> Result<(), StepError> {
+        HANDOFF_PROBES.fetch_add(1, Ordering::SeqCst);
+        Err(StepError::Failed("not found".into()))
+    }
+
+    #[tokio::test]
+    async fn boot_modprobe_timeout_is_not_repeated_by_the_retry() {
+        let sys = FakeSys::new();
+        sys.add_rdma_device();
+        let env = TosEnv {
+            load_rdma_cm: counted_modprobe,
+            ..fake_env(&sys, WAIT)
+        };
+        let r = TosRetry::new(env);
+        let handed_off = PendingTos {
+            skip_modprobe: true,
+            ..pending()
+        };
+        r.start(PROFILE, Some(&handed_off));
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        configfs_appears_late(&sys);
+        assert!(wait_for(|| r.outcome(PROFILE).is_some()).await);
+        assert_eq!(HANDOFF_PROBES.load(Ordering::SeqCst), 0);
+        assert_eq!(sys.read_tos(), "106");
     }
 
     #[tokio::test]

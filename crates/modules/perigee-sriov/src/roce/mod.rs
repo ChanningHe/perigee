@@ -273,6 +273,21 @@ fn restore_pause(
     }
 }
 
+/// A timed-out pause change leaves global pause unknown; whether the port may
+/// then have no flow control depends on PFC.
+fn pause_unknown(e: StepError, pfc_on: bool) -> StepError {
+    match e {
+        StepError::TimedOut(m) if pfc_on => {
+            StepError::TimedOut(format!("{m}. Global pause state unknown; PFC is on"))
+        }
+        StepError::TimedOut(m) => StepError::TimedOut(format!(
+            "{m}. Global pause state unknown and PFC not enabled: the port may have NO flow \
+             control"
+        )),
+        other => other,
+    }
+}
+
 /// Run the plan's steps through `exec`, returning the errors. A failing step
 /// does not stop the independent ones after it, except that PFC is skipped
 /// when pause could not be turned off, and a failed PFC write restores the
@@ -290,18 +305,15 @@ pub fn execute_plan(
     let mut errors = Vec::new();
     // None: no pause step in the plan; Some(ok): whether it succeeded.
     let mut pause_changed: Option<bool> = None;
+    // Pause is only turned off when PFC is on or about to be: no PFC step
+    // means PFC is already on.
+    let pfc_on = !plan.steps.iter().any(|s| matches!(s, QosStep::Pfc(_)));
     for (i, step) in plan.steps.iter().enumerate() {
         let res = match step {
             QosStep::SetPause(target) => {
                 let res = set_pause(*target, &mut exec, &mut read_pause);
                 pause_changed = Some(res.is_ok());
-                res.map_err(|e| match e {
-                    StepError::TimedOut(m) => StepError::TimedOut(format!(
-                        "{m}. Global pause state unknown and PFC not enabled: the port may \
-                         have NO flow control"
-                    )),
-                    other => other,
-                })
+                res.map_err(|e| pause_unknown(e, pfc_on))
             }
             QosStep::Pfc(_) if pause_changed == Some(false) => Err(StepError::Failed(
                 "PFC not applied because disabling global pause failed".to_string(),
@@ -487,10 +499,12 @@ fn apply_tos(
     paths: &TosPaths,
     out: &mut QosOutcome,
 ) {
+    let mut skip_modprobe = false;
     let attempt = if after_timeout {
         TosAttempt::Pending("not attempted because an earlier RoCE command timed out".into())
     } else {
-        tos::try_write_tos(paths, pf, tos, || modprobe_rdma_cm(run))
+        let load = || tos::guarded_load(&mut skip_modprobe, || modprobe_rdma_cm(run));
+        tos::try_write_tos(paths, pf, tos, load)
     };
     match attempt {
         TosAttempt::Done { changed: true } => info!(pf = %pf, tos, "RoCE default ToS written"),
@@ -502,6 +516,7 @@ fn apply_tos(
             out.pending_tos = Some(PendingTos {
                 pf: pf.to_string(),
                 tos,
+                skip_modprobe,
             });
         }
         TosAttempt::Failed(e) => out

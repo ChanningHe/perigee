@@ -40,6 +40,9 @@ impl TosPaths {
 pub struct PendingTos {
     pub pf: String,
     pub tos: u8,
+    /// `modprobe rdma_cm` already timed out: never run it again, only wait
+    /// for the configfs tree (the kernel may still finish loading it).
+    pub skip_modprobe: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,10 +68,25 @@ pub fn try_write_tos(
     }
 }
 
+/// Run `load` (modprobe) unless it timed out before; a timeout sets `skip`,
+/// so a hung modprobe is never run twice.
+pub(super) fn guarded_load(
+    skip: &mut bool,
+    load: impl FnOnce() -> Result<(), StepError>,
+) -> Result<(), StepError> {
+    if *skip {
+        return Err(StepError::Failed(
+            "`modprobe rdma_cm` timed out earlier; not run again".into(),
+        ));
+    }
+    let res = load();
+    *skip = res.as_ref().is_err_and(StepError::is_timeout);
+    res
+}
+
 /// The PF's RDMA device, once it and the rdma_cm configfs tree exist (the
 /// tree appears only once rdma_cm is loaded, hence `load_rdma_cm`). `Err`
-/// is `Pending`, or `Failed` when loading rdma_cm timed out: a hung modprobe
-/// is not run again.
+/// is `Pending` with the reason.
 pub(super) fn prepare(
     paths: &TosPaths,
     pf: &str,
@@ -80,9 +98,6 @@ pub(super) fn prepare(
         return Ok(ibdev);
     }
     let why = match load_rdma_cm() {
-        Err(e) if e.is_timeout() => {
-            return Err(TosAttempt::Failed(format!("{e}; not retried")));
-        }
         _ if paths.rdma_cm.is_dir() => return Ok(ibdev),
         Err(e) => e.to_string(),
         Ok(()) => "is configfs mounted?".to_string(),
@@ -257,16 +272,30 @@ mod tests {
     }
 
     #[test]
-    fn modprobe_timeout_is_a_failure_not_pending() {
+    fn modprobe_timeout_is_pending_and_never_rerun() {
         let sys = FakeSys::new();
         sys.add_rdma_device();
-        let res = try_write_tos(&sys.paths, PF, 106, || {
+        let (mut skip, mut loads) = (false, 0);
+        let mut hung = || {
+            loads += 1;
             Err(StepError::TimedOut("`modprobe rdma_cm` timed out".into()))
-        });
+        };
+        let res = try_write_tos(&sys.paths, PF, 106, || guarded_load(&mut skip, &mut hung));
         assert!(
-            matches!(res, TosAttempt::Failed(ref e) if e.contains("not retried")),
+            matches!(res, TosAttempt::Pending(ref e) if e.contains("timed out")),
             "{res:?}"
         );
+        assert!(skip);
+        let res = try_write_tos(&sys.paths, PF, 106, || guarded_load(&mut skip, &mut hung));
+        assert!(matches!(res, TosAttempt::Pending(ref e) if e.contains("not run again")));
+        assert_eq!(loads, 1);
+    }
+
+    #[test]
+    fn modprobe_failure_without_timeout_may_run_again() {
+        let mut skip = false;
+        let _ = guarded_load(&mut skip, || Err(StepError::Failed("not found".into())));
+        assert!(!skip);
     }
 
     #[test]

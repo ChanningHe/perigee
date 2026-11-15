@@ -22,8 +22,9 @@ pub struct SriovProfileConfig {
     #[serde(default = "default_mac_strategy")]
     pub mac_strategy: MacStrategyConfig,
     /// PF RX ring size (`ethtool -G <pf> rx N`). Absent (the default): the
-    /// ring is never read or written. Checked (> 0) by the ring step, so a
-    /// bad value never blocks VF creation.
+    /// ring is never read or written. `0` is rejected by the ring step, so it
+    /// never blocks VF creation; a value of the wrong type (`-1`, a string)
+    /// fails parsing of the whole file like any other typo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rx_ring: Option<u32>,
     #[serde(default)]
@@ -460,7 +461,7 @@ mode = "daemon_watch"
     }
 
     #[test]
-    fn legacy_config_defaults_to_auto_link_state_and_no_roce() {
+    fn legacy_config_leaves_link_state_unmanaged_and_has_no_roce() {
         let profile = profile_from(LEGACY_TOML);
         assert_eq!(profile.defaults.link_state, None, "unmanaged");
         assert_eq!(profile.vf[0].link_state, None);

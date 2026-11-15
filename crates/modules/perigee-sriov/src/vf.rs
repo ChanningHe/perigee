@@ -37,6 +37,7 @@ pub fn apply_profile(profile_name: &str, config: &SriovProfileConfig) -> Result<
         errors: Vec::new(),
         warnings: Vec::new(),
         pending_tos: None,
+        vf_config_hung: false,
     };
 
     // Step 1: Ensure PF is up
@@ -130,6 +131,10 @@ pub struct ApplyResult {
     /// counted as an error. Only the daemon retries it in the background, so
     /// any other caller must report it as an error.
     pub pending_tos: Option<PendingTos>,
+    /// VF configuration was cut short because `ip` timed out (netlink hung),
+    /// leaving VFs without their MAC/VLAN/trust settings. At boot this makes
+    /// the daemon exit so systemd retries the apply.
+    pub vf_config_hung: bool,
 }
 
 impl ApplyResult {
@@ -260,7 +265,10 @@ fn configure_stage(
     result: &mut ApplyResult,
 ) {
     match link_up_err.filter(is_timeout) {
-        Some(e) => result.errors.push(format!("{e}; {IP_HUNG}")),
+        Some(e) => {
+            result.errors.push(format!("{e}; {IP_HUNG}"));
+            result.vf_config_hung = true;
+        }
         None => configure_all_vfs(pf, config, count, ip, result),
     }
 }
@@ -277,11 +285,12 @@ fn configure_all_vfs(
         Ok(states) => states,
         Err(e) => {
             result.errors.push(e);
+            result.vf_config_hung = true;
             return;
         }
     };
     let macs = MacStrategy::from_config(&config.mac_strategy, &config.mac).generate(count);
-    let (configured, errors) = configure_vfs(count, |i| {
+    let (configured, errors, hung) = configure_vfs(count, |i| {
         let live = live_states
             .iter()
             .find(|s| s.index == i)
@@ -292,6 +301,7 @@ fn configure_all_vfs(
     });
     result.configured_vfs = configured;
     result.errors.extend(errors);
+    result.vf_config_hung = hung;
 }
 
 /// Current VF link states, so `state` is only written where it differs. Read
@@ -317,10 +327,14 @@ fn live_link_states(
     }
 }
 
-/// Run `configure` for VFs `0..count`, returning how many succeeded and the
-/// errors. The first timeout stops the loop: netlink is stuck, and going on
-/// would cost a [`CMD_TIMEOUT`] per command for every remaining VF.
-fn configure_vfs(count: u32, mut configure: impl FnMut(u32) -> Result<()>) -> (u32, Vec<String>) {
+/// Run `configure` for VFs `0..count`, returning how many succeeded, the
+/// errors, and whether a timeout cut the loop short. The first timeout stops
+/// the loop: netlink is stuck, and going on would cost a [`CMD_TIMEOUT`] per
+/// command for every remaining VF.
+fn configure_vfs(
+    count: u32,
+    mut configure: impl FnMut(u32) -> Result<()>,
+) -> (u32, Vec<String>, bool) {
     let mut configured = 0;
     let mut errors = Vec::new();
     for i in 0..count {
@@ -331,12 +345,12 @@ fn configure_vfs(count: u32, mut configure: impl FnMut(u32) -> Result<()>) -> (u
                 errors.push(format!(
                     "VF#{i} config failed: {e}; stopped, {left} remaining VF(s) left unconfigured"
                 ));
-                break;
+                return (configured, errors, true);
             }
             Err(e) => errors.push(format!("VF#{i} config failed: {e}")),
         }
     }
-    (configured, errors)
+    (configured, errors, false)
 }
 
 fn configure_single_vf(
@@ -628,7 +642,7 @@ link_state = "auto"
     #[test]
     fn vf_loop_stops_at_first_timeout() {
         let mut tried = Vec::new();
-        let (configured, errors) = configure_vfs(64, |i| {
+        let (configured, errors, hung) = configure_vfs(64, |i| {
             tried.push(i);
             if i == 2 {
                 Err(timeout_err())
@@ -640,11 +654,12 @@ link_state = "auto"
         assert_eq!(configured, 2);
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("61 remaining VF(s) left unconfigured"));
+        assert!(hung);
     }
 
     #[test]
     fn vf_loop_continues_past_ordinary_failures() {
-        let (configured, errors) = configure_vfs(4, |i| {
+        let (configured, errors, hung) = configure_vfs(4, |i| {
             if i == 1 {
                 bail!("RTNETLINK answers: Invalid argument")
             }
@@ -655,6 +670,7 @@ link_state = "auto"
             errors,
             ["VF#1 config failed: RTNETLINK answers: Invalid argument"]
         );
+        assert!(!hung, "ordinary failures are not a hang");
     }
 
     const LINK_STATE_PROFILE: &str = "[sriov.p]\nmac = \"8c:2a:8e:88:9a:f6\"\nnum_vfs = 3\n\
@@ -674,6 +690,7 @@ link_state = "auto"
             errors: Vec::new(),
             warnings: Vec::new(),
             pending_tos: None,
+            vf_config_hung: false,
         }
     }
 
@@ -719,6 +736,7 @@ link_state = "auto"
         assert_eq!(calls, ["-d link show p"]);
         assert_eq!(result.configured_vfs, 0);
         assert!(result.errors[0].contains(IP_HUNG), "{:?}", result.errors);
+        assert!(result.vf_config_hung);
     }
 
     #[test]
@@ -729,6 +747,14 @@ link_state = "auto"
         let (result, calls) = stage(LINK_STATE_PROFILE, None, "");
         assert!(calls[0].starts_with("-d link show"));
         assert_eq!(result.configured_vfs, 3);
+        assert!(!result.vf_config_hung);
+    }
+
+    #[test]
+    fn per_vf_timeout_marks_the_configuration_hung() {
+        let (result, _) = stage(PLAIN_PROFILE, None, "link set p vf 1");
+        assert_eq!(result.configured_vfs, 1);
+        assert!(result.vf_config_hung);
     }
 
     #[test]
@@ -736,10 +762,12 @@ link_state = "auto"
         let (result, calls) = stage(PLAIN_PROFILE, Some(timeout_err()), "");
         assert!(calls.is_empty(), "{calls:?}");
         assert!(result.errors[0].contains(IP_HUNG));
+        assert!(result.vf_config_hung);
         // Control: an ordinary link-up failure still configures the VFs.
         let (result, calls) = stage(PLAIN_PROFILE, Some(anyhow::anyhow!("EPERM")), "");
         assert!(!calls.is_empty());
         assert_eq!(result.configured_vfs, 3);
+        assert!(!result.vf_config_hung);
     }
 
     #[test]

@@ -150,7 +150,10 @@ only writes `link_state` to the file when one is chosen.
 `rx_ring = N` keeps the PF's RX ring at `N` entries (`ethtool -G <pf> rx N`),
 e.g. when the default ring overflows under bursts (`rx_out_of_buffer`
 growing). Without the key perigee never reads or writes the ring; a config
-without it behaves exactly as before. `N` must be greater than 0.
+without it behaves exactly as before. `N` must be greater than 0: `0` is
+reported by the ring step and never blocks VFs, but a value of the wrong type
+(`-1`, a string) makes the whole `sriov.toml` fail to parse, like any other
+typo, and then no profile is applied.
 
 - **Idempotent**: perigee reads `ethtool -g <pf>` and writes only when the
   current RX value differs. A value above the device's pre-set maximum is
@@ -158,8 +161,10 @@ without it behaves exactly as before. `N` must be greater than 0.
   written.
 - **Rounding**: after a write perigee reads the ring back. Drivers may round
   (mlx5 rounds up to a power of two); if the device then reports another
-  value, a warning names it and asks to set `rx_ring` to that value, since
-  otherwise every apply rebuilds the PF's queues again.
+  value, a warning names it and asks to set `rx_ring` to that value. perigee
+  compares against the configured value, so a value the driver rounds is
+  requested again on every apply and the live-apply warning repeats; whether
+  the driver then actually rebuilds the queues is driver-specific.
 - **Applied live, too**: changing the ring rebuilds the PF netdev's queues
   (about 1.5 s on a ConnectX-5, the netdev's carrier toggles once) but does
   not flap the physical link, and VFs and RDMA sessions are not affected. So
@@ -255,15 +260,32 @@ Behaviour:
   are covered: sysfs/configfs writes (`sriov_numvfs`, the rdma_cm configfs
   mkdir/write) have no timeout. A process stuck in the kernel that ignores
   SIGKILL is left behind.
+- **`ip` hang at boot: the daemon exits and systemd retries**: when an `ip`
+  timeout cuts VF configuration short during the boot apply (PF link-up, the
+  VF link-state read, or any per-VF `ip link set`), the daemon logs it, sets
+  a systemd status, and exits non-zero without ever reporting READY.
+  `Restart=on-failure` starts it again after `RestartSec=5`, so the whole
+  apply is retried roughly every 15 s or more (5 s plus the attempt, which
+  includes at least one 10 s timeout) until `ip` responds again; networking
+  waits for it as before. VFs created so far stay as they are, and guests
+  that start meanwhile may see unconfigured VFs (driver MAC, no VLAN, default
+  trust/spoofchk), the same as with v0.1.4 during a hang. A command that is
+  merely slow but would succeed after more than 10 s is now killed and
+  retried instead of awaited. RoCE and RX ring timeouts and ordinary command
+  failures do not trigger this: they are reported (degraded/error) and boot
+  continues. Live applies (TUI "Save & Apply", `perigee sriov retry`) never
+  exit the daemon; they only report the profile as error/degraded.
 - **ToS when the RDMA device appears late**: at boot the RDMA device
   (`/sys/class/net/<pf>/device/infiniband/`) or the rdma_cm configfs tree may
   not exist yet. That is not an error and does not delay boot: the profile
   gets a "RoCE ToS pending" warning and the daemon retries in the background
   every 5 s for up to 10 minutes from that apply, writing only if the value
   differs. On success it logs an info event (RDMA connections opened before
-  then keep their old ToS until they reconnect); on timeout, a rejected write
-  or a hung `modprobe rdma_cm` (not repeated) it logs an error and the
-  profile shows as degraded. Re-applying the profile (boot, TUI "Save &
+  then keep their old ToS until they reconnect); on timeout or a rejected
+  write it logs an error and the profile shows as degraded. A `modprobe
+  rdma_cm` that timed out is never run again (the kernel may still finish
+  loading the module); the retry then only waits for the configfs tree.
+  Re-applying the profile (boot, TUI "Save &
   Apply", `perigee sriov retry`) replaces the retry; a reload stops it only
   when the profile is removed or its PF or `[roce]` section changed, and
   otherwise leaves it running; shutting down stops it.

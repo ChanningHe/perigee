@@ -428,6 +428,18 @@ fn pause_timeout_is_not_re_read_and_skips_pfc() {
 }
 
 #[test]
+fn pause_timeout_with_pfc_already_on_says_so() {
+    let mut s = converged_state();
+    s.pause = Ok(PAUSE_ON);
+    let p = boot_plan(&s);
+    assert_eq!(p.steps, vec![QosStep::SetPause(PAUSE_OFF)]);
+    let errors = execute_plan(&p, Some(PAUSE_ON), |st| Err(timed_out(st)), || Ok(PAUSE_ON));
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].contains("PFC is on"), "{}", errors[0]);
+    assert!(!errors[0].contains("NO flow control"), "{}", errors[0]);
+}
+
+#[test]
 fn pause_reread_timeout_also_stops_the_plan() {
     let (calls, rereads, errors) = run_boot_with(
         |s| match s {
@@ -576,6 +588,20 @@ fn command_timeout_skips_the_tos_write() {
     assert_eq!(sys.read_tos(), "0", "no ToS write after a timeout");
     assert!(out.pending_tos.is_some(), "deferred to the daemon");
     assert!(out.errors.iter().any(|e| e.contains("not attempted")));
+}
+
+#[test]
+fn boot_modprobe_timeout_hands_off_a_pending_tos_without_modprobe() {
+    let sys = FakeSys::new();
+    sys.add_rdma_device(); // configfs missing: the ToS step runs modprobe
+    let (out, calls) = apply_with(&sys, "modprobe");
+    assert_eq!(
+        calls.iter().filter(|c| c.starts_with("modprobe")).count(),
+        1
+    );
+    let pending = out.pending_tos.expect("pending, not failed");
+    assert!(pending.skip_modprobe, "the retry must not run it again");
+    assert!(out.errors.is_empty(), "{:?}", out.errors);
 }
 
 #[test]

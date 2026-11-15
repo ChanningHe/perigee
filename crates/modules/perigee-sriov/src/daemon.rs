@@ -2,7 +2,7 @@ use crate::config::{sriov_config_path, FdbMode, SriovFileConfig, SriovProfileCon
 use crate::fdb::{FdbService, FdbStatus, FdbTarget};
 use crate::roce::retry::{TosEnv, TosRetry};
 use crate::vf;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use perigee_core::error::PerigeeError;
@@ -15,6 +15,9 @@ use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
 use perigee_daemon::module::{BootPhase, Module};
+
+/// Applies one profile; [`vf::apply_profile`] outside tests.
+type ApplyFn = fn(&str, &SriovProfileConfig) -> Result<vf::ApplyResult>;
 
 /// Events kept per profile.
 const MAX_EVENTS: usize = 200;
@@ -36,6 +39,7 @@ pub struct SriovModule {
     fdb: FdbService,
     /// Background retries of RoCE ToS writes an apply left pending.
     tos_retry: TosRetry,
+    apply_fn: ApplyFn,
     /// sriov.toml loaded successfully at least once (gates FDB reconciling).
     config_loaded: bool,
     shutdown_tx: Option<broadcast::Sender<()>>,
@@ -57,6 +61,7 @@ impl SriovModule {
             profiles: BTreeMap::new(),
             fdb: FdbService::new(),
             tos_retry: TosRetry::new(env),
+            apply_fn: vf::apply_profile,
             config_loaded: false,
             shutdown_tx: None,
         }
@@ -115,20 +120,26 @@ impl SriovModule {
             .with_context(|| format!("failed to load {}", path.display()))
     }
 
-    async fn apply_all_profiles(&mut self) {
+    /// Apply every profile; returns the profiles whose VF configuration was
+    /// cut short by a hung `ip`.
+    async fn apply_all_profiles(&mut self) -> Vec<String> {
+        let apply = self.apply_fn;
+        let mut hung = Vec::new();
         for (name, rt) in &mut self.profiles {
             let profile_name = name.clone();
             let config = rt.config.clone();
             push_events(&mut rt.events, self.tos_retry.cancel(name));
 
             let apply_result =
-                tokio::task::spawn_blocking(move || vf::apply_profile(&profile_name, &config))
-                    .await;
+                tokio::task::spawn_blocking(move || apply(&profile_name, &config)).await;
 
             match apply_result {
                 Ok(Ok(result)) => {
                     self.tos_retry.start(name, result.pending_tos.as_ref());
                     record_result(rt, &result);
+                    if result.vf_config_hung {
+                        hung.push(name.clone());
+                    }
                 }
                 Ok(Err(e)) => record_error(rt, &e),
                 Err(e) => {
@@ -140,6 +151,7 @@ impl SriovModule {
                 }
             }
         }
+        hung
     }
 
     pub fn get_profile_detail(&self, profile_name: &str) -> Option<ProfileDetailStatus> {
@@ -188,7 +200,7 @@ impl SriovModule {
     }
 
     pub fn retry_profile(&mut self, profile_name: &str) -> Result<()> {
-        self.retry_profile_with(profile_name, vf::apply_profile)
+        self.retry_profile_with(profile_name, self.apply_fn)
     }
 
     fn retry_profile_with(
@@ -271,10 +283,20 @@ impl Module for SriovModule {
         Ok(())
     }
 
+    /// Boot-time apply (the only caller). A VF configuration cut short by a
+    /// hung `ip` is an error so the daemon exits before READY and systemd
+    /// retries, as a hang that outlasted TimeoutStartSec did before command
+    /// timeouts existed. Live applies (IPC, retry) never take this path.
     async fn apply(&mut self) -> Result<()> {
-        self.apply_all_profiles().await;
+        let hung = self.apply_all_profiles().await;
         if self.config_loaded {
             self.sync_fdb();
+        }
+        if !hung.is_empty() {
+            bail!(
+                "VF configuration of profile(s) {} cut short by a hung `ip` command",
+                hung.join(", ")
+            );
         }
         Ok(())
     }
@@ -560,6 +582,7 @@ mod tests {
         PendingTos {
             pf: PF.into(),
             tos: 106,
+            skip_modprobe: false,
         }
     }
 
@@ -593,6 +616,7 @@ mod tests {
             errors: errors.iter().map(|e| e.to_string()).collect(),
             warnings: Vec::new(),
             pending_tos,
+            vf_config_hung: false,
         }
     }
 
@@ -606,8 +630,11 @@ mod tests {
         sys.add_configfs_group("0");
         let mut m = module(&sys);
         m.tos_retry.start("p", Some(&pending()));
+        let live = m.tos_retry.generation("p");
         let new = BTreeMap::from([("p".to_string(), profile_config(false))]);
         m.cancel_stale_tos_retries(&new);
+        // The running task only writes while its generation is current.
+        assert_ne!(m.tos_retry.generation("p"), live, "retry cancelled");
         sys.add_rdma_device();
         tokio::time::sleep(SETTLE).await;
         assert_eq!(sys.read_tos(), "0", "disabled section never written late");
@@ -619,8 +646,10 @@ mod tests {
         sys.add_configfs_group("0");
         let mut m = module(&sys);
         m.tos_retry.start("p", Some(&pending()));
+        let live = m.tos_retry.generation("p");
         let new = BTreeMap::from([("p".to_string(), profile_config(true))]);
         m.cancel_stale_tos_retries(&new);
+        assert_eq!(m.tos_retry.generation("p"), live, "same task still current");
         sys.add_rdma_device();
         assert!(wait_for(|| m.tos_retry.outcome("p").is_some()).await);
         assert_eq!(sys.read_tos(), "106", "the original task still wrote");
@@ -676,6 +705,54 @@ mod tests {
         assert!(wait_for(|| m.tos_retry.outcome("p").is_some()).await);
         assert_eq!(sys.read_tos(), "106");
         m.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn boot_apply_fails_when_vf_configuration_hung() {
+        let sys = FakeSys::new();
+        let mut m = module(&sys);
+        m.apply_fn = |_, _| {
+            let mut r = result(1, &["VF#1 config failed: `ip ...` did not finish"], None);
+            r.vf_config_hung = true;
+            Ok(r)
+        };
+        let err = m.apply().await.unwrap_err();
+        assert!(err.to_string().contains("hung"), "{err}");
+        let rt = &m.profiles["p"];
+        assert_eq!(rt.state, ProfileState::Degraded, "state still recorded");
+        assert!(rt.events.iter().any(|e| e.message.contains("Degraded")));
+    }
+
+    #[tokio::test]
+    async fn boot_apply_succeeds_despite_ordinary_failures_and_pf_step_timeouts() {
+        let sys = FakeSys::new();
+        let mut m = module(&sys);
+        m.apply_fn = |_, _| {
+            Ok(result(
+                1,
+                &[
+                    "VF#1 config failed: RTNETLINK answers: Invalid argument",
+                    "roce: `dcb app add ...` did not finish within 10s and was killed",
+                    "rx_ring: cannot read the RX ring: `ethtool -g p` did not finish",
+                ],
+                None,
+            ))
+        };
+        m.apply().await.unwrap();
+        assert_eq!(state(&m), ProfileState::Degraded);
+    }
+
+    #[tokio::test]
+    async fn live_retry_with_hung_vf_configuration_only_reports() {
+        let sys = FakeSys::new();
+        let mut m = module(&sys);
+        let hung = |_: &str, _: &SriovProfileConfig| {
+            let mut r = result(0, &["`ip link set p up` did not finish"], None);
+            r.vf_config_hung = true;
+            Ok(r)
+        };
+        m.retry_profile_with("p", hung).unwrap();
+        assert_eq!(state(&m), ProfileState::Error);
     }
 
     #[test]
