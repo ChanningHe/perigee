@@ -40,7 +40,7 @@ pub fn render(frame: &mut Frame, sriov: &SriovState, area: Rect) {
             Span::styled(
                 format!(
                     "[{}{}]",
-                    &sriov.editing_name,
+                    sriov.editing_name,
                     if is_editing_name { "▎" } else { "" }
                 ),
                 name_style,

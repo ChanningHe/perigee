@@ -26,7 +26,7 @@ pub fn render_general(frame: &mut Frame, sriov: &SriovState, area: Rect) {
     let is_editing_vf_count = sriov.edit_focus == Some(EditFocus::GeneralVfCount);
 
     let vf_count_display = if is_editing_vf_count {
-        format!("[{}▎]", &sriov.vf_count_buf)
+        format!("[{}▎]", sriov.vf_count_buf)
     } else {
         let val = profile.as_ref().map(|p| p.num_vfs).unwrap_or(0);
         format!("[{}]", val)
@@ -297,7 +297,7 @@ pub fn render_vf_table(frame: &mut Frame, sriov: &SriovState, area: Rect) {
             };
             let is_editing_vlan = is_selected && sriov.edit_focus == Some(EditFocus::VfVlanId);
             let vlan_str = if is_editing_vlan {
-                format!("[{}▎]", &sriov.vlan_id_buf)
+                format!("[{}▎]", sriov.vlan_id_buf)
             } else {
                 vf_override
                     .and_then(|o| o.vlan.as_ref())
